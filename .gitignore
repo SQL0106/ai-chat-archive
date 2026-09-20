@@ -1,0 +1,19 @@
+# 归档数据：体积大（raw 157M / out 677M），而且是你自己的聊天记录，不传
+raw/
+out/
+
+# 选集状态：个人数据
+work/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp

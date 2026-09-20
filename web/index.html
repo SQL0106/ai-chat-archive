@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 聊天归档</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">AI 聊天归档</div>
+  <nav class="tabs">
+    <button class="tab active" data-tab="stats">统计</button>
+    <button class="tab" data-tab="browse">浏览</button>
+    <button class="tab" data-tab="search">搜索</button>
+    <button class="tab" data-tab="timeline">时间线</button>
+    <button class="tab" data-tab="selection">选集</button>
+  </nav>
+  <div class="jumpbox">
+    <input type="datetime-local" id="jumpInput" step="1" title="按日期时间跳转">
+    <button id="jumpBtn" class="primary">跳转</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ============ 统计 ============ -->
+  <section id="tab-stats" class="panel active">
+    <div class="page">
+      <div id="statCards" class="cards"></div>
+
+      <div class="fold" data-fold="time">
+        <button class="fold-h" type="button"><span class="fold-i">▾</span><span>时间分布</span><span class="fold-x" id="foldX-time"></span></button>
+        <div class="fold-b">
+          <div class="grid2">
+            <div class="card"><h3>每年消息量</h3><div id="chartYear" class="chart hchart"></div></div>
+            <div class="card"><h3>每月消息量</h3><div id="chartMonth" class="chart"></div></div>
+          </div>
+          <div class="grid2">
+            <div class="card"><h3>每天时段分布 (0-23 时)</h3><div id="chartHour" class="chart"></div></div>
+            <div class="card"><h3>星期分布</h3><div id="chartWeekday" class="chart"></div></div>
+          </div>
+          <div class="card">
+            <h3>活跃热力图 · 星期 × 小时</h3>
+            <div id="heatmap" class="heatmap"></div>
+            <div class="heat-legend"><span>少</span><i class="heat-0"></i><i class="heat-1"></i><i class="heat-2"></i><i class="heat-3"></i><i class="heat-4"></i><span>多</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fold" data-fold="active">
+        <button class="fold-h" type="button"><span class="fold-i">▾</span><span>活跃度</span><span class="fold-x" id="foldX-active"></span></button>
+        <div class="fold-b">
+          <div id="activeCards" class="cards"></div>
+          <div class="grid2">
+            <div class="card"><h3>连续活跃</h3><div id="streakBox" class="kv"></div></div>
+            <div class="card"><h3>最忙记录</h3><div id="busyBox" class="kv"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fold" data-fold="content">
+        <button class="fold-h" type="button"><span class="fold-i">▾</span><span>内容构成</span><span class="fold-x" id="foldX-content"></span></button>
+        <div class="fold-b">
+          <div class="grid2">
+            <div class="card"><h3>谁在说话（字符数）</h3><div id="chartRoleChars" class="chart hchart"></div></div>
+            <div class="card"><h3>模型分布</h3><div id="chartModel" class="chart hchart"></div></div>
+          </div>
+          <div class="card">
+            <h3>最长单条消息（字符）</h3>
+            <div id="longestMsg" class="longmsg"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fold" data-fold="length">
+        <button class="fold-h" type="button"><span class="fold-i">▾</span><span>长度分布</span><span class="fold-x" id="foldX-length"></span></button>
+        <div class="fold-b">
+          <div class="grid2">
+            <div class="card"><h3>对话长度（按消息数）</h3><div id="chartConvHist" class="chart"></div></div>
+            <div class="card"><h3>消息长度（按字符数）</h3><div id="chartMsgHist" class="chart"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fold" data-fold="source">
+        <button class="fold-h" type="button"><span class="fold-i">▾</span><span>来源</span><span class="fold-x" id="foldX-source"></span></button>
+        <div class="fold-b">
+          <div class="grid2">
+            <div class="card"><h3>对话来源</h3><div id="chartSource" class="chart hchart"></div></div>
+            <div class="card"><h3>时间戳来源</h3><div id="chartTsSrc" class="chart hchart"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="fold" data-fold="tables">
+        <button class="fold-h" type="button"><span class="fold-i">▾</span><span>榜单</span><span class="fold-x" id="foldX-tables"></span></button>
+        <div class="fold-b">
+          <div class="grid2">
+            <div class="card"><h3>最长对话（字符数）</h3><div id="tableLongest" class="mini-table"></div></div>
+            <div class="card"><h3>最多消息</h3><div id="tableTop" class="mini-table"></div></div>
+            <div class="card"><h3>跨度最长</h3><div id="tableSpan" class="mini-table"></div></div>
+            <div class="card"><h3>最近活动</h3><div id="tableRecent" class="mini-table"></div></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ 浏览（左列表 + 右阅读） ============ -->
+  <section id="tab-browse" class="panel">
+    <div class="split" id="browseSplit">
+
+      <aside class="pane-list">
+        <div class="list-filters">
+          <input type="search" id="browseQ" placeholder="过滤标题 / 会话 ID…">
+          <div class="row">
+            <select id="browseSource" title="来源">
+              <option value="">全部来源</option>
+              <option value="gemini">Gemini</option>
+              <option value="chatgpt">ChatGPT</option>
+              <option value="deepseek">DeepSeek</option>
+            </select>
+            <select id="browseSort" title="排序">
+              <option value="updated">最后更新</option>
+              <option value="created">创建时间</option>
+              <option value="oldest">最早优先</option>
+              <option value="messages">消息数</option>
+              <option value="title">标题</option>
+            </select>
+          </div>
+          <div class="row">
+            <input type="date" id="browseFrom" title="起始日期 (UTC+8)">
+            <span class="tilde">~</span>
+            <input type="date" id="browseTo" title="结束日期 (UTC+8)">
+            <button id="browseReset" title="清空筛选">重置</button>
+          </div>
+          <div class="row list-stat">
+            <span id="browseCount" class="count"></span>
+          </div>
+        </div>
+        <div id="browseList" class="list-scroll"></div>
+        <div class="pager" id="browsePager">
+          <button id="browseMore">加载更多</button>
+        </div>
+      </aside>
+
+      <section class="pane-reader">
+        <div id="readerEmpty" class="reader-empty">
+          <div class="re-icon">💬</div>
+          <div>从左侧选择一个对话</div>
+          <div class="re-sub">也可以按 <kbd>/</kbd> 搜索，或在上方按时间跳转</div>
+        </div>
+
+        <div id="reader" class="reader hidden">
+          <div class="reader-head">
+            <div class="reader-title">
+              <div id="readerName"></div>
+              <div id="readerMeta" class="meta"></div>
+            </div>
+            <div class="reader-actions">
+              <button id="readerStar" title="加入选集">☆</button>
+              <button id="readerMd" title="下载 Markdown">下载</button>
+              <button id="readerClose" title="关闭 (Esc)">✕</button>
+            </div>
+          </div>
+          <div id="hlBar" class="hl-bar hidden">
+            <span class="hl-label">高亮</span>
+            <span id="hlQuery" class="hl-q"></span>
+            <span id="hlCount" class="hl-count"></span>
+            <button id="hlPrev" title="上一个 (Shift+Enter)">↑</button>
+            <button id="hlNext" title="下一个 (Enter)">↓</button>
+            <button id="hlClear" title="清除高亮">✕</button>
+          </div>
+          <div id="readerBody" class="reader-body"></div>
+          <button id="toTop" class="to-top hidden">↑ 顶部</button>
+        </div>
+      </section>
+
+    </div>
+  </section>
+
+  <!-- ============ 搜索 ============ -->
+  <section id="tab-search" class="panel">
+    <div class="page">
+      <div class="filters">
+        <input type="search" id="searchQ" placeholder="全文搜索… 支持 AND / OR / &quot;短语&quot; / 前缀*">
+        <select id="searchRole">
+          <option value="">全部角色</option>
+          <option value="user">我</option>
+          <option value="assistant">AI</option>
+        </select>
+        <input type="date" id="searchFrom" title="起始日期 (UTC+8)">
+        <span class="tilde">~</span>
+        <input type="date" id="searchTo" title="结束日期 (UTC+8)">
+        <button id="searchBtn" class="primary">搜索</button>
+        <span id="searchCount" class="count"></span>
+      </div>
+      <div id="searchList" class="search-list"></div>
+      <div class="pager">
+        <button id="searchPrev">上一页</button>
+        <span id="searchPage"></span>
+        <button id="searchNext">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 时间线 ============ -->
+  <section id="tab-timeline" class="panel">
+    <div class="page">
+      <div class="filters">
+        <label class="inline">粒度
+          <select id="tlBucket">
+            <option value="day">按天</option>
+            <option value="month">按月</option>
+          </select>
+        </label>
+        <input type="date" id="tlFrom" title="起始日期">
+        <span class="tilde">~</span>
+        <input type="date" id="tlTo" title="结束日期">
+        <button id="tlApply" class="primary">应用</button>
+        <button id="tlAll">全部时间</button>
+        <span id="tlCount" class="count"></span>
+      </div>
+      <div class="card">
+        <div id="tlChart" class="ts-wrap"></div>
+      </div>
+      <div id="tlDayList" class="conv-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ 选集 ============ -->
+  <section id="tab-selection" class="panel">
+    <div class="page">
+      <div class="filters">
+        <label class="inline">选集
+          <input type="text" id="selColl" value="default" size="12" title="选集名称">
+        </label>
+        <button id="selRefresh">刷新</button>
+        <label class="inline"><input type="checkbox" id="selWithThinking"> 含思维链</label>
+        <span class="spacer"></span>
+        <button id="selExportMd" class="primary">导出 Markdown</button>
+        <button id="selExportHtml">导出 HTML</button>
+        <button id="selExportJsonl">导出 JSONL</button>
+        <span id="selCount" class="count"></span>
+      </div>
+      <p class="hint">在「浏览」列表或阅读器里点 ☆ 把对话加入选集。选集保存在
+        <code>work/selection.jsonl</code>（追加写入，可手工编辑）。</p>
+      <div id="selList" class="conv-list"></div>
+    </div>
+  </section>
+
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
