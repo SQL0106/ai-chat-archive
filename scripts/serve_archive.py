@@ -17,6 +17,8 @@
     GET /api/timeline         按天/月聚合 (from/to/bucket)
     GET /api/day              某天活跃的对话 (date)
     GET /api/jump             按日期时间定位到最近的消息 (ts)
+    GET /api/analysis         LLM 分析结果 (id / ids / tiers / list，默认返回进度+配置)
+    GET /api/emotion          按周的情绪/价值时间线 (from/to)
 
 时区: 所有时间戳在库里是 UTC，本服务按 UTC+8 展示/过滤（可用 --tz-offset 改）。
 """
@@ -40,9 +42,13 @@ DEFAULT_WEB = ROOT / "web"
 
 sys.path.insert(0, str(ROOT / "tools"))
 import arclib  # noqa: E402  (共享数据层，CLI 与 Web 共用)
+import analysis  # noqa: E402  (LLM 分析结果库)
+import llm  # noqa: E402  (只读配置用于展示，不会联网)
 
 DB_PATH = DEFAULT_DB
 WEB_DIR = DEFAULT_WEB
+ANALYSIS_DB = ROOT / "work" / "analysis.sqlite"
+ANALYSIS_DB_PATH = ANALYSIS_DB
 TZ = timezone(timedelta(hours=8))
 
 MAX_LIMIT = 200
@@ -387,6 +393,82 @@ def api_export(conn, qs):
 
 
 # --------------------------------------------------------------------------
+# LLM 分析 / 情绪时间线
+# --------------------------------------------------------------------------
+
+def _analysis_conn():
+    """打开分析库；还没跑过 analyze.py 时返回 None。"""
+    if not ANALYSIS_DB_PATH.is_file():
+        return None
+    return analysis.open_analysis_db(str(ANALYSIS_DB_PATH), readonly=True)
+
+
+def api_analysis(conn, qs):
+    """LLM 分析结果查询。
+
+    ?id=<cid>     单个对话的分析结果
+    ?ids=a,b,c    批量（用于列表页显示价值/情绪）
+    ?tiers=1      高/中/低三档 id 列表
+    ?list=1       所有分析结果（分页截断）
+    默认          分析进度 + LLM 配置（不联网）
+    """
+    adb = _analysis_conn()
+    if adb is None:
+        return {"available": False,
+                "error": "还没有分析数据，先跑 python3 tools/analyze.py run"}
+    try:
+        cid = (qs.get("id", [""])[0] or "").strip()
+        ids = (qs.get("ids", [""])[0] or "").strip()
+        if cid:
+            return {"available": True, "record": analysis.get(adb, cid)}
+        if ids:
+            wanted = [x.strip() for x in ids.split(",") if x.strip()][:MAX_LIMIT]
+            recs = {}
+            for c in wanted:
+                r = analysis.get(adb, c)
+                if r:
+                    recs[c] = r
+            return {"available": True, "records": recs}
+        if qs.get("tiers", [""])[0]:
+            limit = min(MAX_LIMIT, max(1, int(qs.get("limit", ["30"])[0] or 30)))
+            tiers = analysis.value_tiers(adb)
+            return {"available": True,
+                    "counts": {k: len(v) for k, v in tiers.items()},
+                    "high": tiers["high"][:limit], "mid": tiers["mid"][:limit],
+                    "low": tiers["low"][:limit]}
+        if qs.get("list", [""])[0]:
+            limit = min(MAX_LIMIT, max(1, int(qs.get("limit", ["50"])[0] or 50)))
+            return {"available": True, "records": analysis.all_records(adb)[:limit]}
+        st = analysis.status(adb)
+        total = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+        st["total_conversations"] = total
+        st["pending"] = max(0, total - (st.get("analyzed") or 0))
+        return {"available": True, "status": st,
+                "config": llm.describe(llm.load_config())}
+    finally:
+        adb.close()
+
+
+def api_emotion(conn, qs):
+    """按周聚合的情绪/价值时间线（from/to 可选，格式 YYYY-MM-DD）。"""
+    adb = _analysis_conn()
+    if adb is None:
+        return {"available": False, "bucket": "week", "weeks": [],
+                "emotion_labels": analysis.EMOTION_LABELS,
+                "error": "还没有分析数据，先跑 python3 tools/analyze.py run"}
+    try:
+        weeks = analysis.weekly(
+            adb,
+            date_from=(qs.get("from", [""])[0] or "").strip() or None,
+            date_to=(qs.get("to", [""])[0] or "").strip() or None,
+            prompt_version=(qs.get("prompt_version", [""])[0] or "").strip() or None)
+        return {"available": True, "bucket": "week", "count": len(weeks),
+                "emotion_labels": analysis.EMOTION_LABELS, "weeks": weeks}
+    finally:
+        adb.close()
+
+
+# --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
 
@@ -458,6 +540,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(api_day(conn, qs))
             if path == "/api/jump":
                 return self.send_json(api_jump(conn, qs))
+            if path == "/api/analysis":
+                return self.send_json(api_analysis(conn, qs))
+            if path == "/api/emotion":
+                return self.send_json(api_emotion(conn, qs))
             if path == "/api/selection":
                 return self.send_json(api_selection_list(conn, qs))
             if path == "/api/export":
@@ -534,9 +620,11 @@ def lan_ip():
 
 
 def main():
-    global DB_PATH, WEB_DIR, TZ_MOD
+    global DB_PATH, WEB_DIR, TZ_MOD, ANALYSIS_DB_PATH
     ap = argparse.ArgumentParser(description="AI 聊天归档浏览服务")
     ap.add_argument("--db", default=str(DEFAULT_DB), help="archive.sqlite 路径")
+    ap.add_argument("--analysis-db", default=str(ANALYSIS_DB),
+                    help="analysis.sqlite 路径 (默认 work/analysis.sqlite)")
     ap.add_argument("--web", default=str(DEFAULT_WEB), help="前端静态目录")
     ap.add_argument("--host", default="0.0.0.0", help="监听地址 (默认 0.0.0.0)")
     ap.add_argument("--port", type=int, default=8765, help="端口 (默认 8765)")
@@ -546,6 +634,7 @@ def main():
 
     DB_PATH = Path(args.db).resolve()
     WEB_DIR = Path(args.web).resolve()
+    ANALYSIS_DB_PATH = Path(args.analysis_db).resolve()
     TZ = timezone(timedelta(hours=args.tz_offset))
     TZ_MOD = "%+g hours" % args.tz_offset
 

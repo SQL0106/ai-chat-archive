@@ -526,6 +526,13 @@ function convRow(c) {
   n.dataset.id = c.conversation_id;
   const t = el('div', 't');
   t.appendChild(el('span', 'src ' + c.source, srcLabel(c.source)));
+  const av = anaValueMap[c.conversation_id];
+  if (av != null) {
+    const b = el('span', 'val-badge', 'v' + av);
+    b.style.color = anaValColor(av);
+    b.style.borderColor = anaValColor(av);
+    t.appendChild(b);
+  }
   t.appendChild(el('span', 'title', c.title || c.conversation_id));
   t.appendChild(el('span', 'n', (c.message_count || 0) + ' 条'));
   n.appendChild(t);
@@ -716,6 +723,331 @@ function applyTimeline() {
   loadTimeline().catch((e) => toast('加载失败: ' + e.message));
 }
 
+/* ---------------- 分析（LLM） ---------------- */
+const EMOTION_COLORS = {
+  joy: '#6ee7b7', calm: '#4c9aff', anxiety: '#f0b429',
+  anger: '#f87171', sadness: '#a78bfa', fatigue: '#94a3b8',
+};
+let anaEmotionLabels = { joy: '喜悦', calm: '平静', anxiety: '焦虑', anger: '愤怒', sadness: '低落', fatigue: '疲惫' };
+const ana = { from: '', to: '', loaded: false, weeks: [], tiers: { high: [], mid: [], low: [] } };
+let anaValueMap = {};
+
+function anaValColor(v) {
+  if (v == null) return 'var(--muted)';
+  if (v >= 4) return 'var(--accent2)';
+  if (v === 3) return 'var(--accent)';
+  return 'var(--warn)';
+}
+
+function renderLineChart(box, weeks, series, opt) {
+  opt = opt || {};
+  box.innerHTML = '';
+  if (!weeks.length) { box.appendChild(el('div', 'empty', '暂无数据')); return; }
+  const cw = box.clientWidth;
+  if (cw < 200) {
+    const tries = (opt._tries || 0) + 1;
+    if (tries <= 10) {
+      requestAnimationFrame(() => renderLineChart(box, weeks, series, Object.assign({}, opt, { _tries: tries })));
+      return;
+    }
+  }
+  const W = cw >= 200 ? cw : 360;
+  const narrow = W < 460;
+  const H = opt.height || 210;
+  const padL = narrow ? 30 : 42, padR = narrow ? 8 : 14, padT = 14, padB = 40;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const n = weeks.length;
+  const ymin = opt.min != null ? opt.min : 0, ymax = opt.max != null ? opt.max : 1;
+  const yfmt = opt.yfmt || ((v) => String(v));
+  const xOf = (i) => (n === 1 ? padL + iw / 2 : padL + iw * (i / (n - 1)));
+  const yOf = (v) => padT + ih - ((Math.max(ymin, Math.min(ymax, v)) - ymin) / (ymax - ymin)) * ih;
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (t, a) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); return e; };
+  const svg = mk('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'tsvg' });
+
+  const nt = 4;
+  for (let t = 0; t <= nt; t++) {
+    const v = ymin + (ymax - ymin) * t / nt;
+    const y = yOf(v);
+    svg.appendChild(mk('line', { x1: padL, x2: W - padR, y1: y, y2: y, class: t ? 'grid' : 'axis' }));
+    const lab = mk('text', { x: padL - 8, y: y + 3.5, class: 'ylab' });
+    lab.textContent = yfmt(v);
+    svg.appendChild(lab);
+  }
+
+  let lastX = -Infinity;
+  weeks.forEach((w, i) => {
+    const lb = opt.xlabel ? opt.xlabel(w, i, weeks) : ((i === 0 || i === n - 1 || n <= 12) ? String(w.week).slice(5) : null);
+    if (!lb) return;
+    const x = xOf(i);
+    const gap = Math.max(opt.minGap || 30, lb.length * (narrow ? 7 : 6) + 10);
+    if (x - lastX >= gap) {
+      const t = mk('text', { x: x, y: padT + ih + 16, class: 'xlab' });
+      t.textContent = lb;
+      svg.appendChild(t);
+      lastX = x;
+    }
+  });
+
+  series.forEach((s) => {
+    const pts = s.values.map((v, i) => xOf(i) + ',' + yOf(v)).join(' ');
+    svg.appendChild(mk('polyline', {
+      points: pts, fill: 'none', stroke: s.color, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    }));
+    s.values.forEach((v, i) => {
+      svg.appendChild(mk('circle', { cx: xOf(i), cy: yOf(v), r: n > 60 ? 1.5 : 2.6, fill: s.color }));
+    });
+  });
+
+  const tip = el('div', 'ts-tip multi');
+  tip.style.display = 'none';
+  box.appendChild(tip);
+  const show = (i) => {
+    const w = weeks[i];
+    let html = '<b>' + w.week + ' ~ ' + w.week_end + '</b> · ' + fmtNum(w.n) + ' 个对话';
+    series.forEach((s) => { html += '<br>' + escHtml(s.name) + ' ' + yfmt(s.values[i]); });
+    if (w.topics && w.topics.length) html += '<br>话题 ' + escHtml(w.topics.slice(0, 4).join(' / '));
+    tip.innerHTML = html;
+    tip.style.left = (xOf(i) / W) * 100 + '%';
+    tip.style.top = '6px';
+    tip.style.display = 'block';
+  };
+  const step = n > 1 ? iw / (n - 1) : iw;
+  weeks.forEach((w, i) => {
+    const x0 = n > 1 ? Math.max(padL, xOf(i) - step / 2) : padL;
+    const x1 = n > 1 ? Math.min(W - padR, xOf(i) + step / 2) : W - padR;
+    const hit = mk('rect', { x: x0, y: padT, width: Math.max(1, x1 - x0), height: ih, class: 'hitrect' });
+    hit.addEventListener('mouseenter', () => show(i));
+    hit.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+    svg.appendChild(hit);
+  });
+  box.appendChild(svg);
+}
+
+function renderEmoLegend(box, keys) {
+  box.innerHTML = '';
+  keys.forEach((k) => {
+    const s = el('span', 'emo-key');
+    const i = el('i');
+    i.style.background = EMOTION_COLORS[k] || '#888';
+    s.appendChild(i);
+    s.appendChild(el('span', null, anaEmotionLabels[k] || k));
+    box.appendChild(s);
+  });
+}
+
+function renderWeeks(weeks) {
+  const box = $('#anaWeeks');
+  box.innerHTML = '';
+  if (!weeks.length) { box.appendChild(el('div', 'empty', '暂无数据')); return; }
+  weeks.slice().reverse().forEach((w) => {
+    const row = el('div', 'week-row');
+    const head = el('div', 'w-head');
+    head.appendChild(el('span', 'w-week', w.week + ' ~ ' + w.week_end));
+    const v = el('span', 'w-val', '价值 ' + (w.value != null ? Number(w.value).toFixed(2) : '—'));
+    v.style.color = anaValColor(w.value);
+    head.appendChild(v);
+    head.appendChild(el('span', null, fmtNum(w.n) + ' 个对话'));
+    head.appendChild(el('span', null, '保留 ' + Math.round((w.keep_ratio || 0) * 100) + '%'));
+    const sent = w.sentiment != null ? Number(w.sentiment) : 0;
+    head.appendChild(el('span', null, '心情 ' + (sent > 0 ? '+' : '') + sent.toFixed(2)));
+    head.appendChild(el('span', null, '强度 ' + Number(w.intensity || 0).toFixed(2)));
+    row.appendChild(head);
+    const emo = el('div', 'w-emo');
+    Object.keys(anaEmotionLabels).forEach((k) => {
+      const val = (w.emotions && w.emotions[k]) || 0;
+      if (val < 0.05) return;
+      const chip = el('span', 'emo-chip', anaEmotionLabels[k] + ' ' + Number(val).toFixed(2));
+      chip.style.borderColor = EMOTION_COLORS[k];
+      chip.style.color = EMOTION_COLORS[k];
+      emo.appendChild(chip);
+    });
+    if (w.topics && w.topics.length) {
+      const t = el('div', 'w-topics');
+      t.appendChild(el('span', 'w-lab', '话题'));
+      w.topics.forEach((x) => t.appendChild(el('span', 'topic-chip', x)));
+      emo.appendChild(t);
+    }
+    row.appendChild(emo);
+    if (w.top && w.top.length) {
+      const tl2 = el('div', 'w-tops');
+      w.top.forEach((c) => {
+        const a = el('div', 'w-top-item');
+        a.appendChild(el('span', 'w-tv', 'v' + c.value));
+        a.appendChild(el('span', 'w-tt', c.title || c.conversation_id));
+        a.onclick = () => openConversation(c.conversation_id);
+        tl2.appendChild(a);
+      });
+      row.appendChild(tl2);
+    }
+    box.appendChild(row);
+  });
+}
+
+async function loadAnaStatus() {
+  const d = await api('/api/analysis', {});
+  const box = $('#anaStatus');
+  const hint = $('#anaHint');
+  box.innerHTML = '';
+  if (!d.available) {
+    hint.classList.remove('hidden');
+    hint.textContent = d.error || '还没有分析数据。';
+    ['#anaEmoChart', '#anaMoodChart', '#anaValChart', '#anaWeeks', '#anaTiers', '#anaEmoLegend'].forEach((s) => {
+      const b = $(s);
+      if (b) b.innerHTML = '';
+    });
+    $('#anaCount').textContent = '';
+    return;
+  }
+  hint.classList.add('hidden');
+  const s = d.status || {}, cfg = d.config || {};
+  const pct = s.total_conversations ? Math.round((s.analyzed || 0) / s.total_conversations * 100) : 0;
+  const cards = [
+    [fmtNum(s.analyzed) + ' / ' + fmtNum(s.total_conversations), '已分析 · ' + pct + '%'],
+    [fmtNum(s.pending), '待分析（个）'],
+    [s.avg_value != null ? Number(s.avg_value).toFixed(2) : '—', '平均价值（0–5）'],
+    [fmtNum(s.keep), '值得保留（个）'],
+    [fmtNum(s.errors), '失败（个）'],
+    [fmtNum(s.prompt_tokens), '输入 tokens'],
+    [fmtNum(s.completion_tokens), '输出 tokens'],
+    [s.cost != null ? '¥' + Number(s.cost).toFixed(2) : '—', '累计花费（元）'],
+  ];
+  cards.forEach(([v, k]) => {
+    const c = el('div', 'stat');
+    c.appendChild(el('div', 'v', v));
+    c.appendChild(el('div', 'k', k));
+    box.appendChild(c);
+  });
+  hint.textContent = '模型 ' + (cfg.model || '—')
+    + ' · key ' + (cfg.api_key_present ? '已配置' : '未配置')
+    + ' · 自定义配置见 work/llm.json'
+    + (cfg.docs ? ' · 文档 ' + cfg.docs : '');
+}
+
+async function loadEmotion() {
+  const d = await api('/api/emotion', { from: ana.from, to: ana.to });
+  if (d.emotion_labels) anaEmotionLabels = d.emotion_labels;
+  if (!d.available) return;
+  const weeks = d.weeks || [];
+  ana.weeks = weeks;
+  $('#anaCount').textContent = weeks.length
+    ? (weeks.length + ' 周 · ' + fmtNum(weeks.reduce((a, b) => a + (b.n || 0), 0)) + ' 个对话')
+    : '暂无数据';
+  const emoKeys = Object.keys(anaEmotionLabels);
+  const series = emoKeys.map((k) => ({
+    name: anaEmotionLabels[k], key: k, color: EMOTION_COLORS[k] || '#888',
+    values: weeks.map((w) => ((w.emotions && w.emotions[k] != null) ? w.emotions[k] : 0)),
+  }));
+  renderLineChart($('#anaEmoChart'), weeks, series, { min: 0, max: 1, yfmt: (v) => v.toFixed(1) });
+  renderEmoLegend($('#anaEmoLegend'), emoKeys);
+  renderLineChart($('#anaMoodChart'), weeks,
+    [{ name: '心情', color: '#4c9aff', values: weeks.map((w) => w.sentiment || 0) }],
+    { min: -1, max: 1, yfmt: (v) => v.toFixed(1) });
+  renderLineChart($('#anaValChart'), weeks,
+    [{ name: '价值', color: '#6ee7b7', values: weeks.map((w) => w.value || 0) }],
+    { min: 0, max: 5, yfmt: (v) => v.toFixed(1) });
+  renderWeeks(weeks);
+}
+
+async function loadTiers() {
+  const d = await api('/api/analysis', { tiers: 1, limit: 60 });
+  const box = $('#anaTiers');
+  if (!d.available) return;
+  ana.tiers = { high: d.high || [], mid: d.mid || [], low: d.low || [] };
+  const allIds = [].concat(ana.tiers.high, ana.tiers.mid, ana.tiers.low);
+  let recs = {};
+  if (allIds.length) {
+    const r = await api('/api/analysis', { ids: allIds.join(',') });
+    recs = r.records || {};
+  }
+  anaValueMap = {};
+  Object.keys(recs).forEach((id) => { if (recs[id]) anaValueMap[id] = recs[id].value; });
+  box.innerHTML = '';
+  const cols = [
+    { key: 'high', name: '高价值 ≥4', cls: 'high' },
+    { key: 'mid', name: '一般 =3', cls: 'mid' },
+    { key: 'low', name: '低价值 ≤2', cls: 'low' },
+  ];
+  cols.forEach((c) => {
+    const col = el('div', 'tier-col ' + c.cls);
+    col.appendChild(el('div', 'tier-h', c.name + ' · ' + fmtNum((d.counts && d.counts[c.key]) || 0)));
+    const list = el('div', 'tier-list');
+    const ids = ana.tiers[c.key] || [];
+    if (!ids.length) list.appendChild(el('div', 'empty', '暂无'));
+    ids.forEach((id) => {
+      const rec = recs[id];
+      const it = el('div', 'tier-item', (rec && rec.title) || id);
+      it.onclick = () => openConversation(id);
+      list.appendChild(it);
+    });
+    col.appendChild(list);
+    box.appendChild(col);
+  });
+  refreshValueBadges();
+}
+
+function refreshValueBadges() {
+  $$('#browseList .conv').forEach((n) => {
+    const v = anaValueMap[n.dataset.id];
+    const old = n.querySelector('.val-badge');
+    if (v == null) { if (old) old.remove(); return; }
+    if (old) {
+      old.textContent = 'v' + v;
+      old.style.color = anaValColor(v);
+      old.style.borderColor = anaValColor(v);
+      return;
+    }
+    const t = n.querySelector('.t');
+    if (!t) return;
+    const b = el('span', 'val-badge', 'v' + v);
+    b.style.color = anaValColor(v);
+    b.style.borderColor = anaValColor(v);
+    t.insertBefore(b, t.querySelector('.title'));
+  });
+}
+
+async function loadAnalysis() {
+  await Promise.all([loadAnaStatus(), loadEmotion(), loadTiers()]);
+}
+
+function applyAnaFilters() {
+  ana.from = $('#anaFrom').value;
+  ana.to = $('#anaTo').value;
+  loadEmotion().catch((e) => toast('情绪加载失败: ' + e.message));
+}
+
+async function loadConvAnalysis(id, token) {
+  const box = $('#readerAnalysis');
+  box.classList.add('hidden');
+  box.innerHTML = '';
+  if (!id) return;
+  let d;
+  try { d = await api('/api/analysis', { id }); } catch (e) { return; }
+  if (token !== openToken) return;
+  if (!d.available || !d.record) return;
+  const r = d.record;
+  box.classList.remove('hidden');
+  const v = el('span', 'ana-pill', '价值 ' + r.value + '/5');
+  v.style.color = anaValColor(r.value);
+  v.style.borderColor = anaValColor(r.value);
+  box.appendChild(v);
+  if (r.kind) box.appendChild(el('span', 'ana-pill', '类型 ' + r.kind));
+  if (r.keep != null) box.appendChild(el('span', 'ana-pill', r.keep ? '值得保留' : '可略过'));
+  const sent = Number(r.sentiment || 0);
+  box.appendChild(el('span', 'ana-pill', '心情 ' + (sent > 0 ? '+' : '') + sent.toFixed(2)));
+  if (r.intensity != null) box.appendChild(el('span', 'ana-pill', '强度 ' + Number(r.intensity).toFixed(2)));
+  Object.keys(r.emotions || {}).forEach((k) => {
+    const val = r.emotions[k];
+    if (!val || val < 0.05) return;
+    const c = el('span', 'emo-chip', (anaEmotionLabels[k] || k) + ' ' + Number(val).toFixed(2));
+    c.style.color = EMOTION_COLORS[k] || '#888';
+    c.style.borderColor = EMOTION_COLORS[k] || '#888';
+    box.appendChild(c);
+  });
+  if (r.summary) box.appendChild(el('span', 'ana-summary', r.summary));
+}
+
 /* ---------------- 选集 ---------------- */
 const sel = { collection: 'default', items: [], busy: false };
 
@@ -832,6 +1164,8 @@ async function openConversation(id, opts) {
   $('#readerEmpty').classList.add('hidden');
   $('#reader').classList.remove('hidden');
   $('#browseSplit').classList.add('reading');
+  $('#readerAnalysis').classList.add('hidden');
+  $('#readerAnalysis').innerHTML = '';
   try {
     const d = await api('/api/conversation', { id });
     if (token !== openToken) return;
@@ -847,6 +1181,8 @@ async function openConversation(id, opts) {
     meta.appendChild(el('span', null, '创建 ' + fmtTs(currentConv.created_at)));
     meta.appendChild(el('span', null, '更新 ' + fmtTs(currentConv.updated_at)));
     meta.appendChild(el('span', null, currentConv.conversation_id));
+
+    loadConvAnalysis(id, token);
 
     const body = $('#readerBody');
     body.innerHTML = '';
@@ -934,6 +1270,8 @@ function closeReader() {
   $('#reader').classList.add('hidden');
   $('#readerEmpty').classList.remove('hidden');
   $('#browseSplit').classList.remove('reading');
+  $('#readerAnalysis').classList.add('hidden');
+  $('#readerAnalysis').innerHTML = '';
   markActiveConv();
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
 }
@@ -986,6 +1324,10 @@ function switchTab(name) {
   if (name === 'browse' && !browse.loaded) { browse.loaded = true; applyBrowse(); }
   if (name === 'timeline' && !tl.loaded) { tl.loaded = true; applyTimeline(); }
   if (name === 'selection') loadSelection().catch((e) => toast('选集加载失败: ' + e.message));
+  if (name === 'analysis' && !ana.loaded) {
+    ana.loaded = true;
+    loadAnalysis().catch((e) => toast('分析加载失败: ' + e.message));
+  }
   if (name === 'search') setTimeout(() => $('#searchQ').focus(), 0);
 }
 
@@ -1029,7 +1371,13 @@ function init() {
   $('#tlBucket').onchange = applyTimeline;
   window.addEventListener('resize', debounce(() => {
     if (tl.loaded && $('#tab-timeline').classList.contains('active')) applyTimeline();
+    if (ana.loaded && $('#tab-analysis').classList.contains('active')) loadEmotion().catch(() => {});
   }, 250));
+
+  // 分析
+  $('#anaApply').onclick = applyAnaFilters;
+  $('#anaAll').onclick = () => { $('#anaFrom').value = ''; $('#anaTo').value = ''; applyAnaFilters(); };
+  loadTiers().catch(() => {});
 
   // 选集
   $('#selColl').addEventListener('change', () => {

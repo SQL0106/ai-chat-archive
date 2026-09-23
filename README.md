@@ -10,13 +10,19 @@
 ├── scripts/
 │   ├── archive_ai_chats.py   解析 → out/
 │   └── serve_archive.py      只读 HTTP 服务 + Web API
-├── tools/      查询 / 选集 / 导出 / MCP（全部只用标准库）
+├── tools/      查询 / 选集 / 导出 / 分析 / MCP（全部只用标准库）
 │   ├── arclib.py             共享数据层（CLI 与 Web 共用）
 │   ├── archive_cli.py        命令行：search / stats / terms / cooccur / select / export …
 │   ├── export.py             选集导出（md / html / jsonl）
+│   ├── llm.py                可配置的 OpenAI 兼容 LLM 适配层（默认 DeepSeek）
+│   ├── analysis.py           分析结果库 + 摘要构造 + 评分规则 + 按周聚合
+│   ├── analyze.py            分析命令行：config / estimate / run / heuristic / status / timeline / tiers
+│   ├── heur.py               纯本地规则分类器（不联网、不需要 key）
 │   └── mcp_server.py         MCP 接口（stdio JSON-RPC，留给自己接 LLM）
 ├── web/        Web 前端（原生 JS，无框架）
 ├── work/       选集状态（selection.jsonl，追加写入）
+│   ├── llm.json              可选：自定义 LLM 接口配置
+│   └── analysis.sqlite       LLM 分析结果（价值 / 情绪 / 类型 / 摘要）
 └── out/        脚本生成的结果
     ├── normalized.jsonl    统一格式，逐条消息（机器用，UTC 时间）
     ├── md/chatgpt/*.md     人类可读（本地时间）
@@ -127,11 +133,12 @@ systemd-run --user --scope -p CPUQuota=40% --collect \
 python3 scripts/serve_archive.py --db out/archive.sqlite --web web --port 8765
 ```
 
-浏览器打开 `http://127.0.0.1:8765`。四个主页面：**统计 / 浏览 / 搜索 / 时间线**，外加 **选集**。
+浏览器打开 `http://127.0.0.1:8765`。五个主页面：**统计 / 浏览 / 搜索 / 时间线 / 分析**，外加 **选集**。
 
 - **浏览**：左边列表 + 右边阅读器，各自独立滚动；列表显示消息数与两行预览，支持来源/时间/排序过滤，滚到底自动加载更多。
 - **搜索**：中文走 `LIKE` 全表扫描（FTS5 的 `unicode61` 分词器对中文几乎不可用），纯 ASCII 走 FTS5，结果按词频+标题加权排序；命中处高亮，点进去可以上下跳（`Enter` / `Shift+Enter`）。
 - **时间线**：手写 SVG 时间序列，按天/按月，悬停出提示，点柱子下钻到当天。
+- **分析**：LLM 分析结果的可视化（见下节）；没有分析数据时给提示，不影响其它页面。
 - 阅读器顶部有 **☆ 加入选集** 和 **下载**（Markdown）。URL 可直接分享：`#c=<对话ID>&i=<消息序号>&q=<搜索词>`。
 
 静态文件是每次从磁盘读、带 `Cache-Control: no-cache`，所以改前端只要刷新浏览器，不用重启服务。
@@ -195,17 +202,128 @@ python3 tools/archive_cli.py export --collection 读书笔记 --format html --wi
 Web 端也能加/删选集（列表和阅读器里的 ☆），导出按钮直接下载。
 导出复用 `out/md/` 里已经写好的 Markdown（找不到时才从 SQLite 现场渲染），思维链默认省略，`--with-thinking` 才带上。
 
+## LLM 分析（价值分层 / 情绪时间线）
+
+把每个对话打分，分出**有价值 / 一般 / 噪声**，并按周聚合出**情绪曲线**。
+打分方式二选一：交给 LLM（下面 1–4），或用**纯本地规则**（第 5 节，不联网不花钱）。
+分析结果存在 `work/analysis.sqlite`，与原始归档完全分离——不跑分析也能正常用其它功能。
+
+### 1. 配置（默认 DeepSeek，可换成任意 OpenAI 兼容接口）
+
+```bash
+python3 tools/analyze.py config                     # 看当前配置（不会联网）
+python3 tools/analyze.py config --init              # 生成 work/llm.json 模板（DeepSeek）
+python3 tools/analyze.py config --init --preset zhipu --force   # 生成智谱模板
+```
+
+默认读取环境变量 `DEEPSEEK_API_KEY`，调用 `https://api.deepseek.com/v1` 的 `deepseek-chat`。
+要换成别的服务，改 `work/llm.json` 里的 `base_url` / `model` / `api_key`，
+或用环境变量 `ARCHIVE_LLM_BASE_URL` / `ARCHIVE_LLM_API_KEY` / `ARCHIVE_LLM_MODEL` 覆盖。
+配置优先级：命令行参数 > 环境变量 > `work/llm.json` > preset 预设 > 内置默认值。
+接口文档：<https://api-docs.deepseek.com/zh-cn/>
+
+**免费方案：智谱 GLM-4.7-Flash（推荐先拿它试跑）**
+
+`glm-4.7-flash` 目前免费、200K 上下文，接口同样是 OpenAI 兼容的。在
+<https://bigmodel.cn/usercenter/proj-mgmt/apikeys> 建一个 key 后：
+
+```bash
+export ZHIPU_API_KEY=你的key
+python3 tools/analyze.py config --init --preset zhipu --force   # 写入 work/llm.json
+python3 tools/analyze.py estimate                               # 应显示「预估花费 ¥0」
+python3 tools/analyze.py run --limit 50                         # 试跑 50 个
+```
+
+也可以完全不建文件，直接用环境变量选预设：
+
+```bash
+ARCHIVE_LLM_PRESET=zhipu ZHIPU_API_KEY=你的key python3 tools/analyze.py run --limit 50
+```
+
+智谱文档：<https://docs.bigmodel.cn/cn/api/introduction> 。
+注意 GLM-4.7 系列默认**开启思考**，本项目的 zhipu 预设已通过
+`extra_payload` 里的 `{"thinking": {"type": "disabled"}}` 关掉，批量分类更快也更省 token。
+
+### 2. 先估个价，再跑
+
+```bash
+python3 tools/analyze.py estimate --sample 20   # 抽样估算 token 与花费
+python3 tools/analyze.py run --limit 200        # 只分析前 200 个未分析的对话
+python3 tools/analyze.py run --dry-run          # 只构造摘要、不调接口（看效果）
+```
+
+整库（约 5500 个对话）用 `deepseek-chat` 估算约 1200 万输入 token、100 万输出 token，
+折合人民币 30 元出头——所以**默认不会自动跑**，请自己按需限量执行。
+这台机器供电弱，建议这样跑：
+
+```bash
+systemd-run --user --scope -p CPUQuota=40% --collect nice -n 19 \
+  python3 tools/analyze.py run --limit 200
+```
+
+### 3. 看结果
+
+```bash
+python3 tools/analyze.py status          # 进度 / 平均价值 / 花费
+python3 tools/analyze.py timeline -v     # 按周的情绪时间线（-v 展开六种情绪）
+python3 tools/analyze.py show <对话ID>    # 单个对话的评分与摘要
+python3 tools/analyze.py tiers           # 价值分层：高价值 / 一般 / 低价值
+python3 tools/analyze.py tiers --dump work/tiers   # 导出成三个 ID 清单
+```
+
+评分规则（写在 `tools/analysis.py` 的 `SYSTEM_PROMPT` 里）：
+`value` 0–5，`keep` = `value ≥ 3`；另外给出 `kind`（技术/学习/工作/…）、
+`topics`、`sentiment`（-1~+1）、`intensity`（0~1）、六种情绪强度
+（joy / calm / anxiety / anger / sadness / fatigue）和一句话摘要。
+情绪时间线按**周**聚合（周一起算），每条曲线取该周的平均值。
+
+### 5. 不想联网 / 不想花钱：纯本地规则分类
+
+`tools/heur.py` 是一个**完全本地、不联网、不需要 key** 的启发式分类器。它用可解释的规则
+（代码块、对话长度、结构化输出、附件、填充语比例、错误关键词……）给对话打 0–5 价值分、
+分类型、贴标签，并用一个小词典粗略估情绪。结果写进同一个 `work/analysis.sqlite`，
+所以上面的 `status` / `timeline` / `tiers` / Web 分析页全都能直接看。
+
+```bash
+python3 tools/analyze.py heuristic --all        # 全部分类，几秒钟跑完
+python3 tools/analyze.py heuristic --limit 100 -v   # 只跑 100 个并逐条打印
+python3 tools/analyze.py heuristic --force      # 已分析的也重跑
+```
+
+也可以用筛选参数只跑某个来源 / 时间段 / 选集（`--source` / `--from` / `--to` / `--collection`）。
+标记为 `model='heuristic'`、`prompt_version='heur-v1'`，与 LLM 结果一眼可分；
+每条记录的 `value_reason` 会写清楚是哪几条规则命中，方便你调 `tools/heur.py` 里的阈值。
+**注意**：情绪是词典法的粗估（尤其技术类对话几乎都判成「平静」），只当参考。
+
+### 6. Web 里看
+
+「分析」页有：进度卡片、六种情绪的周线图、心情走势、价值走势、每周明细、价值分层三列。
+浏览列表里每个对话会带上 `vN` 价值徽标，阅读器标题下方显示该对话的价值/类型/情绪/摘要。
+
 ## MCP 接口（给以后的 LLM 工具用）
 
-`tools/mcp_server.py` 是一个 stdio JSON-RPC 的 MCP 服务器，把归档包成 7 个工具：
-`search` / `conversation` / `stats` / `selection_list` / `selection_add` / `selection_remove` / `export_text`。
+`tools/mcp_server.py` 是一个 stdio JSON-RPC 的 MCP 服务器，把归档包成 **17 个工具**：
+
+- 检索类：`search` / `conversation` / `stats` / `selection_list` / `selection_add` / `selection_remove` / `export_text`
+- 分析类：`analysis_config` / `analysis_pending` / `analysis_digest` / `analysis_save` /
+  `analyze_conversation` / `analysis_get` / `analysis_status` / `emotion_timeline` / `value_tiers`
+- 本地分类：`classify_conversation`（纯本地规则，不联网、不需要 key）
 
 ```bash
 python3 tools/mcp_server.py --db out/archive.sqlite
 ```
 
-它**不调用任何 LLM**，只是把数据层暴露出去，方便以后接自己的分析工具。
-所有工具都有硬上限（最多 30 条结果、片段 300 字符、单条消息 4000 字符、单次导出 20 万字符），
+**两种分析姿势**，看你把 LLM 放在哪一边：
+
+- `analysis_digest`：**服务端不调 LLM**。它把某个对话压成一段摘要（首尾+等距采样，默认上限 6000 字符）
+  连同评分用的 system prompt 和输出 schema 一起返回，交给 **MCP 客户端自己的 LLM** 去打分，
+  再用 `analysis_save` 把 JSON 结果存回 `work/analysis.sqlite`。
+- `analyze_conversation`：**服务端直接调 LLM**（用 `work/llm.json` / 环境变量里的配置），
+  返回并保存分析结果。没有可用 API key 时会明确报错，不会偷偷联网。
+
+其余分析工具只读：`analysis_pending`（还有哪些没分析）、`analysis_status`（进度/花费）、
+`analysis_get`（取结果）、`emotion_timeline`（按周情绪）、`value_tiers`（价值分层）。
+检索类工具都有硬上限（最多 30 条结果、片段 300 字符、单条消息 4000 字符、单次导出 20 万字符），
 就是为了防止把整库灌进上下文。
 
 ## 查询归档（直接写 SQL）

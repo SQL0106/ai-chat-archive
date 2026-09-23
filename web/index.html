@@ -15,6 +15,7 @@
     <button class="tab" data-tab="browse">浏览</button>
     <button class="tab" data-tab="search">搜索</button>
     <button class="tab" data-tab="timeline">时间线</button>
+    <button class="tab" data-tab="analysis">分析</button>
     <button class="tab" data-tab="selection">选集</button>
   </nav>
   <div class="jumpbox">
@@ -166,6 +167,7 @@
               <button id="readerClose" title="关闭 (Esc)">✕</button>
             </div>
           </div>
+          <div id="readerAnalysis" class="reader-analysis hidden"></div>
           <div id="hlBar" class="hl-bar hidden">
             <span class="hl-label">高亮</span>
             <span id="hlQuery" class="hl-q"></span>
@@ -228,6 +230,45 @@
         <div id="tlChart" class="ts-wrap"></div>
       </div>
       <div id="tlDayList" class="conv-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ 分析（LLM） ============ -->
+  <section id="tab-analysis" class="panel">
+    <div class="page">
+      <div id="anaStatus" class="cards"></div>
+      <p id="anaHint" class="hint hidden"></p>
+
+      <div class="filters">
+        <input type="date" id="anaFrom" title="起始日期">
+        <span class="tilde">~</span>
+        <input type="date" id="anaTo" title="结束日期">
+        <button id="anaApply" class="primary">应用</button>
+        <button id="anaAll">全部时间</button>
+        <span class="spacer"></span>
+        <span id="anaCount" class="count"></span>
+      </div>
+
+      <div class="card">
+        <h3>情绪周线 · 每条线是一种情绪（0 – 1）</h3>
+        <div id="anaEmoChart" class="ts-wrap"></div>
+        <div id="anaEmoLegend" class="emo-legend"></div>
+      </div>
+
+      <div class="grid2">
+        <div class="card"><h3>心情走势 · sentiment（-1 低落 ~ +1 愉快）</h3><div id="anaMoodChart" class="ts-wrap"></div></div>
+        <div class="card"><h3>价值走势 · value（0 – 5）</h3><div id="anaValChart" class="ts-wrap"></div></div>
+      </div>
+
+      <div class="card">
+        <h3>每周明细</h3>
+        <div id="anaWeeks" class="week-list"></div>
+      </div>
+
+      <div class="card">
+        <h3>价值分层 · 高价值 ≥4 / 一般 =3 / 低价值 ≤2</h3>
+        <div id="anaTiers" class="tier-cols"></div>
+      </div>
     </div>
   </section>
 
