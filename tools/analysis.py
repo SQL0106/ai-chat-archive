@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import arclib
+import sanitize
 
 ROOT = Path(__file__).resolve().parent.parent
 ANALYSIS_DB = ROOT / "work" / "analysis.sqlite"
@@ -226,7 +227,7 @@ def build_digest(conn, cid, max_chars=DIGEST_MAX_CHARS, max_msgs=DIGEST_MAX_MSGS
     used = 0
     for m in picked:
         role = "用户" if m.get("role") == "user" else "助手"
-        text = _clip(m.get("text"), msg_chars)
+        text = sanitize.mask(_clip(m.get("text"), msg_chars))
         line = "[%s] %s" % (role, text)
         if used + len(line) > max_chars:
             lines.append("…（后续内容已省略）")
@@ -237,7 +238,7 @@ def build_digest(conn, cid, max_chars=DIGEST_MAX_CHARS, max_msgs=DIGEST_MAX_MSGS
     return {
         "conversation_id": cid,
         "source": conv.get("source"),
-        "title": conv.get("title"),
+        "title": sanitize.mask(conv.get("title")),
         "created_at": conv.get("created_at"),
         "message_count": conv.get("message_count"),
         "sampled": len(picked),
@@ -414,6 +415,43 @@ def value_tiers(conn, prompt_version=None):
         key = "high" if v >= 4 else ("mid" if v == 3 else "low")
         tiers[key].append(rec["conversation_id"])
     return tiers
+
+
+def records_by_ids(conn, ids):
+    """按给定 id 顺序取记录，返回 {conversation_id: rec}，缺失的跳过。"""
+    out = {}
+    for cid in ids:
+        rec = get(conn, cid)
+        if rec:
+            out[cid] = rec
+    return out
+
+
+def emotional_records(conn, min_intensity=0.3, min_sentiment=0.2,
+                      kinds=("情绪",), prompt_version=None, limit=None):
+    """挑出「值得做情绪分析」的记录。
+
+    命中任一条件即算：类型属于情绪类；情绪强度 >= min_intensity；
+    |整体基调| >= min_sentiment。按情绪强度从高到低排序。
+    """
+    picked = []
+    for rec in all_records(conn):
+        if prompt_version and rec.get("prompt_version") != prompt_version:
+            continue
+        inten = rec.get("intensity")
+        senti = rec.get("sentiment")
+        inten = float(inten) if inten is not None else 0.0
+        senti = float(senti) if senti is not None else 0.0
+        if rec.get("kind") in kinds or inten >= min_intensity or abs(senti) >= min_sentiment:
+            picked.append(rec)
+    picked.sort(key=lambda r: (float(r.get("intensity") or 0.0),
+                               abs(float(r.get("sentiment") or 0.0))), reverse=True)
+    return picked[:limit] if limit else picked
+
+
+def emotional_ids(conn, **kw):
+    """emotional_records 只要 id 集合。"""
+    return {r["conversation_id"] for r in emotional_records(conn, **kw)}
 
 
 if __name__ == "__main__":

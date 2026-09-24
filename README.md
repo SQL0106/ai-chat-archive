@@ -9,7 +9,8 @@
 ├── raw/        放原始导出文件（你手动下载的）
 ├── scripts/
 │   ├── archive_ai_chats.py   解析 → out/
-│   └── serve_archive.py      只读 HTTP 服务 + Web API
+│   ├── serve_archive.py      只读 HTTP 服务 + Web API
+│   └── fetch_lexicon.sh      拉取敏感词库到 third_party/（不进仓库）
 ├── tools/      查询 / 选集 / 导出 / 分析 / MCP（全部只用标准库）
 │   ├── arclib.py             共享数据层（CLI 与 Web 共用）
 │   ├── archive_cli.py        命令行：search / stats / terms / cooccur / select / export …
@@ -18,10 +19,13 @@
 │   ├── analysis.py           分析结果库 + 摘要构造 + 评分规则 + 按周聚合
 │   ├── analyze.py            分析命令行：config / estimate / run / heuristic / status / timeline / tiers
 │   ├── heur.py               纯本地规则分类器（不联网、不需要 key）
+│   ├── sanitize.py           敏感词 + 个人信息脱敏（等长 * 替换）
 │   └── mcp_server.py         MCP 接口（stdio JSON-RPC，留给自己接 LLM）
 ├── web/        Web 前端（原生 JS，无框架）
+├── third_party/  敏感词库（git 忽略，用 scripts/fetch_lexicon.sh 拉取）
 ├── work/       选集状态（selection.jsonl，追加写入）
 │   ├── llm.json              可选：自定义 LLM 接口配置
+│   ├── reports.json          网页「智能解读」保存的报告
 │   └── analysis.sqlite       LLM 分析结果（价值 / 情绪 / 类型 / 摘要）
 └── out/        脚本生成的结果
     ├── normalized.jsonl    统一格式，逐条消息（机器用，UTC 时间）
@@ -133,12 +137,13 @@ systemd-run --user --scope -p CPUQuota=40% --collect \
 python3 scripts/serve_archive.py --db out/archive.sqlite --web web --port 8765
 ```
 
-浏览器打开 `http://127.0.0.1:8765`。五个主页面：**统计 / 浏览 / 搜索 / 时间线 / 分析**，外加 **选集**。
+浏览器打开 `http://127.0.0.1:8765`。六个主页面：**统计 / 浏览 / 搜索 / 时间线 / 分析 / 智能**，外加 **选集**。
 
 - **浏览**：左边列表 + 右边阅读器，各自独立滚动；列表显示消息数与两行预览，支持来源/时间/排序过滤，滚到底自动加载更多。
 - **搜索**：中文走 `LIKE` 全表扫描（FTS5 的 `unicode61` 分词器对中文几乎不可用），纯 ASCII 走 FTS5，结果按词频+标题加权排序；命中处高亮，点进去可以上下跳（`Enter` / `Shift+Enter`）。
 - **时间线**：手写 SVG 时间序列，按天/按月，悬停出提示，点柱子下钻到当天。
 - **分析**：LLM 分析结果的可视化（见下节）；没有分析数据时给提示，不影响其它页面。
+- **智能**：在浏览器里配置 LLM 接口、选取素材、流式解读、保存报告（见「智能解读」一节）。
 - 阅读器顶部有 **☆ 加入选集** 和 **下载**（Markdown）。URL 可直接分享：`#c=<对话ID>&i=<消息序号>&q=<搜索词>`。
 
 静态文件是每次从磁盘读、带 `Cache-Control: no-cache`，所以改前端只要刷新浏览器，不用重启服务。
@@ -299,6 +304,41 @@ python3 tools/analyze.py heuristic --force      # 已分析的也重跑
 
 「分析」页有：进度卡片、六种情绪的周线图、心情走势、价值走势、每周明细、价值分层三列。
 浏览列表里每个对话会带上 `vN` 价值徽标，阅读器标题下方显示该对话的价值/类型/情绪/摘要。
+
+## 智能解读（网页里直接问）
+
+「智能」页把这套流程搬到浏览器里，不用命令行也能配置和调用 LLM：
+
+- **接口配置**：选预设（DeepSeek / 智谱 GLM-4.7-Flash 免费）或自己填 `base_url` / `model` / `api_key_env`，
+  可临时填一个 API key（保存到 `work/llm.json`，权限 600；接口只回显「是否已配置」，绝不回传 key）。
+  保存即时生效，无需重启。
+- **取材**：数据源可选
+  - **值得分析的情感**：只挑经过分类、确实带情绪信号的对话（`kind=情绪`，或情绪强度 / 正负基调超过阈值）；
+  - **高价值**（value ≥ 4）/ **当前选集** / **最近** / **全部**；
+  再限个条数。取材结果会做**脱敏**后再送出去（见下）。
+- **流式解读**：输入提示词（默认「总结我在这段时间里的情绪变化、反复出现的主题和压力来源」），
+  点「开始解读」后逐字流式返回，可随时停止；结果可一键保存。
+- **已保存的解读**：存在 `work/reports.json`（最多 60 条），可删除。
+
+### 敏感词 / 个人信息脱敏
+
+送进 LLM 之前，正文会先过一遍 **`tools/sanitize.py`**，把两类内容等长替换成 `*`：
+
+- **敏感词**：词库取自开源的 [konsheng/Sensitive-lexicon](https://github.com/konsheng/Sensitive-lexicon)（MIT）。
+  运行 `scripts/fetch_lexicon.sh` 拉取到 `third_party/Sensitive-lexicon/`（**不进仓库**）。
+  默认只用其中的政治 / 反动 / 民生 / 贪腐 / GFW 等中文词表（可用 `work/sensitive_files.txt`
+  写 `all` / `none` / 自定义文件名，或用环境变量 `ARCHIVE_SENSITIVE_FILES` / `ARCHIVE_LEXICON_DIR` 覆盖）。
+- **个人信息**：手机号、座机、身份证号、邮箱、银行卡号、IPv4、常见 API key（`sk-…` / `ghp_…` / `AKIA…` 等）。
+  用 `ARCHIVE_MASK_PII=none` 可以只脱敏敏感词、保留个人信息。
+
+脱敏是**等长**替换（原字符数 = `*` 的个数），送出去的 token 量基本不变，上下文长度可控。
+命令行同理：`analysis.build_digest` 在拼摘要时就会脱敏，`analyze.py run` 送出去的已经是处理过的文本。
+查看当前状态（只打印词库 / 规则概况，不打印任何词）：
+
+```bash
+python3 tools/sanitize.py              # 当前词库与 PII 规则概况
+python3 scripts/fetch_lexicon.sh --check
+```
 
 ## MCP 接口（给以后的 LLM 工具用）
 

@@ -406,6 +406,47 @@ mark.current { background: var(--accent); color: #04121f; }
 }
 .ana-summary { color: var(--fg2); font-size: 12px; flex: 1 1 100%; line-height: 1.6; }
 
+/* ---------- 智能（LLM 接口 + 解读） ---------- */
+#llmPrompt, .filters textarea {
+  width: 100%; box-sizing: border-box; margin: 8px 0; padding: 8px 10px;
+  background: var(--bg3); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 8px; font: inherit; resize: vertical; line-height: 1.6;
+}
+.inline.grow { flex: 1 1 260px; }
+.inline.grow input { width: 100%; box-sizing: border-box; }
+.llm-out {
+  white-space: pre-wrap; word-break: break-word; min-height: 24px;
+  max-height: 460px; overflow: auto; padding: 10px 12px;
+  background: var(--bg3); border: 1px solid var(--line); border-radius: 8px;
+  line-height: 1.6; font-size: 14px; color: var(--fg2);
+}
+.llm-out:empty::before { content: '解读结果会显示在这里…'; color: var(--muted); }
+.llm-out.streaming { border-color: var(--accent); }
+.rep-list { display: flex; flex-direction: column; gap: 10px; }
+.rep-row { background: var(--bg3); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.rep-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rep-title { color: var(--fg); }
+.rep-meta { color: var(--muted); font-size: 12px; }
+.rep-del { margin-left: auto; }
+.rep-body {
+  margin: 8px 0 0; white-space: pre-wrap; word-break: break-word;
+  max-height: 260px; overflow: auto; color: var(--fg2);
+  font-size: 13px; line-height: 1.55;
+}
+
+/* ---------- 分析进度（后台跑） ---------- */
+.ana-run { margin: 10px 0 4px; }
+.ana-bar {
+  height: 8px; border-radius: 999px; overflow: hidden;
+  background: var(--bg3); border: 1px solid var(--line);
+}
+.ana-fill {
+  height: 100%; width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transition: width .4s ease;
+}
+.ana-run-line { margin-top: 6px; color: var(--muted); font-size: 12px; }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 820px) {
   .split { position: relative; }
@@ -429,4 +470,5 @@ mark.current { background: var(--accent); color: #04121f; }
   .cards { gap: 8px; }
   .grid2 { grid-template-columns: 1fr; gap: 10px; }
   .tier-cols { grid-template-columns: 1fr; }
+  .inline.grow { flex-basis: 100%; }
 }

@@ -729,8 +729,9 @@ const EMOTION_COLORS = {
   anger: '#f87171', sadness: '#a78bfa', fatigue: '#94a3b8',
 };
 let anaEmotionLabels = { joy: '喜悦', calm: '平静', anxiety: '焦虑', anger: '愤怒', sadness: '低落', fatigue: '疲惫' };
-const ana = { from: '', to: '', loaded: false, weeks: [], tiers: { high: [], mid: [], low: [] } };
+const ana = { from: '', to: '', loaded: false, pending: 0, weeks: [], tiers: { high: [], mid: [], low: [] } };
 let anaValueMap = {};
+let anaTimer = null;
 
 function anaValColor(v) {
   if (v == null) return 'var(--muted)';
@@ -923,6 +924,49 @@ async function loadAnaStatus() {
     + ' · key ' + (cfg.api_key_present ? '已配置' : '未配置')
     + ' · 自定义配置见 work/llm.json'
     + (cfg.docs ? ' · 文档 ' + cfg.docs : '');
+  ana.pending = s.pending || 0;
+  renderAnaRun(s);
+}
+
+function renderAnaRun(s) {
+  const box = $('#anaRun');
+  if (!box) return;
+  const entries = Object.entries(s.by_model || {}).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  box.classList.remove('hidden');
+  const total = s.total_conversations || 0;
+  const llm = s.llm_analyzed != null ? s.llm_analyzed : (s.analyzed || 0);
+  const rest = Math.max(0, total - llm);
+  const pct = total ? (llm / total * 100) : 0;
+  ana.llmRemaining = rest;
+  box.innerHTML = '';
+  const bar = el('div', 'ana-bar');
+  const fill = el('div', 'ana-fill');
+  fill.style.width = pct.toFixed(1) + '%';
+  bar.appendChild(fill);
+  box.appendChild(bar);
+  const line = el('div', 'ana-run-line');
+  let txt = 'LLM 分析 ' + fmtNum(llm) + ' / ' + fmtNum(total) + '（' + pct.toFixed(1) + '%）'
+    + ' · 剩余 ' + fmtNum(rest) + ' · '
+    + entries.map(([m, n]) => m + ' ' + fmtNum(n)).join(' · ');
+  txt += rest === 0 ? ' · 已完成' : ' · 每 15 秒自动刷新';
+  line.textContent = txt;
+  box.appendChild(line);
+}
+
+function scheduleAnaRefresh() {
+  if (anaTimer) { clearTimeout(anaTimer); anaTimer = null; }
+  if (!ana.loaded) return;
+  const panel = $('#tab-analysis');
+  if (!panel || !panel.classList.contains('active')) return;
+  anaTimer = setTimeout(async () => {
+    try { await loadAnaStatus(); } catch (e) { /* 忽略刷新失败 */ }
+    if (ana.llmRemaining > 0) scheduleAnaRefresh();
+  }, 15000);
 }
 
 async function loadEmotion() {
@@ -1046,6 +1090,169 @@ async function loadConvAnalysis(id, token) {
     box.appendChild(c);
   });
   if (r.summary) box.appendChild(el('span', 'ana-summary', r.summary));
+}
+
+/* ---------------- 智能（LLM 接口 + 解读） ---------------- */
+const llmUI = { presets: [], loaded: false, controller: null, report: null };
+
+function llmState(txt) { $('#llmState').textContent = txt; }
+
+async function loadLlm() {
+  const d = await api('/api/llm/config');
+  llmUI.presets = d.presets || [];
+  const sel = $('#llmPreset');
+  sel.innerHTML = '<option value="">（自定义）</option>' + llmUI.presets.map(
+    (p) => '<option value="' + escHtml(p.name) + '">' + escHtml(p.label) + '</option>').join('');
+  sel.value = d.preset || '';
+  $('#llmBase').value = d.base_url || '';
+  $('#llmModel').value = d.model || '';
+  $('#llmTemp').value = (d.temperature != null ? d.temperature : '');
+  $('#llmMax').value = (d.max_tokens != null ? d.max_tokens : '');
+  $('#llmKeyEnv').value = d.api_key_env || '';
+  $('#llmKey').value = '';
+  $('#llmRemoveKey').checked = false;
+  llmState('模型 ' + (d.model || '?') + ' @ ' + (d.base_url || '?') +
+    ' · key ' + (d.api_key_present ? '已就绪' : '未配置') +
+    (d.config_exists ? ' · 配置已保存' : ' · 尚未保存') + (d.docs ? ' · 文档 ' + d.docs : ''));
+}
+
+async function saveLlm() {
+  const body = {
+    preset: $('#llmPreset').value,
+    base_url: $('#llmBase').value.trim(),
+    model: $('#llmModel').value.trim(),
+    temperature: $('#llmTemp').value,
+    max_tokens: $('#llmMax').value,
+    api_key_env: $('#llmKeyEnv').value.trim(),
+    api_key: $('#llmKey').value.trim(),
+    removeKey: $('#llmRemoveKey').checked,
+  };
+  const r = await fetch('/api/llm/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) { toast('保存失败: ' + (j.error || r.status)); return; }
+  toast('配置已保存');
+  await loadLlm();
+}
+
+async function previewInterpret() {
+  const d = await api('/api/interpret', { scope: $('#llmScope').value, limit: $('#llmLimit').value });
+  if (!d.ok) { $('#llmMeta').textContent = ''; toast(d.error || '取材失败'); return null; }
+  $('#llmMeta').textContent = '取材 ' + d.count + ' 个对话 · ' + fmtNum(d.chars) + ' 字 · ' +
+    (d.masked ? '已脱敏' : '未脱敏');
+  return d;
+}
+
+function streamChat(messages, box) {
+  return new Promise((resolve) => {
+    const ctrl = new AbortController();
+    llmUI.controller = ctrl;
+    fetch('/api/llm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, stream: true }), signal: ctrl.signal,
+    }).then(async (r) => {
+      if (!r.ok) {
+        let m = 'HTTP ' + r.status;
+        try { const j = await r.json(); if (j.error) m = j.error; } catch (e) { /* ignore */ }
+        box.textContent = '⚠ ' + m; resolve(m); return;
+      }
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (data === '[DONE]') { resolve(null); return; }
+          try {
+            const j = JSON.parse(data);
+            const ch = (j.choices && j.choices[0] && (j.choices[0].delta || {}).content) || '';
+            if (ch) { box.textContent += ch; box.scrollTop = box.scrollHeight; }
+          } catch (e) { /* ignore keep-alive / partial */ }
+        }
+      }
+      resolve(null);
+    }).catch((e) => {
+      if (e.name === 'AbortError') { box.textContent += '\n（已停止）'; resolve(null); }
+      else { box.textContent = '⚠ ' + e.message; resolve(e.message); }
+    });
+  });
+}
+
+async function runInterpret() {
+  const ctx = await previewInterpret();
+  if (!ctx) return;
+  const prompt = $('#llmPrompt').value.trim() ||
+    '请基于下面的对话摘录，总结我在这段时间里的情绪变化、反复出现的主题和压力来源。';
+  const system = '你是一个温和、客观的助手。只依据用户提供的对话摘录分析其情绪变化与主题，不要编造事实；' +
+    '内容中的 * 是脱敏占位符。用简体中文、条理清晰地回答。';
+  const out = $('#llmOut');
+  out.textContent = '';
+  out.classList.add('streaming');
+  $('#llmRun').disabled = true;
+  $('#llmStop').disabled = false;
+  $('#llmOutMeta').textContent = '生成中…';
+  const err = await streamChat(
+    [{ role: 'system', content: system },
+     { role: 'user', content: prompt + '\n\n以下是对话摘录（已脱敏）：\n\n' + ctx.context }], out);
+  $('#llmRun').disabled = false;
+  $('#llmStop').disabled = true;
+  out.classList.remove('streaming');
+  llmUI.report = {
+    title: prompt.slice(0, 40), scope: $('#llmScope').value,
+    count: ctx.count, prompt, content: out.textContent,
+  };
+  $('#llmOutMeta').textContent = err ? ('出错: ' + err) : (fmtNum(out.textContent.length) + ' 字');
+}
+
+async function saveReport() {
+  if (!llmUI.report || !llmUI.report.content.trim()) { toast('还没有可保存的解读'); return; }
+  const r = await fetch('/api/reports', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(llmUI.report),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) { toast('保存失败: ' + (j.error || r.status)); return; }
+  toast('已保存');
+  loadReports();
+}
+
+async function removeReport(id) {
+  const r = await fetch('/api/reports', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remove: id }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (j.ok) { toast('已删除'); loadReports(); } else toast('删除失败');
+}
+
+async function loadReports() {
+  const d = await api('/api/reports');
+  const box = $('#repList');
+  const items = d.reports || [];
+  if (!items.length) { box.innerHTML = '<p class="hint">还没有保存的解读。</p>'; return; }
+  box.innerHTML = '';
+  items.forEach((it) => {
+    const row = el('div', 'rep-row');
+    const head = el('div', 'rep-head');
+    head.appendChild(el('b', 'rep-title', it.title || '未命名解读'));
+    head.appendChild(el('span', 'rep-meta', [
+      it.time ? fmtTs(it.time, true) : '', it.model || '', it.scope || '',
+      (it.count != null ? it.count + ' 对话' : ''),
+    ].filter(Boolean).join(' · ')));
+    const rm = el('button', 'rep-del', '删除');
+    rm.title = '删除';
+    rm.onclick = () => removeReport(it.id).catch((e) => toast('删除失败: ' + e.message));
+    head.appendChild(rm);
+    row.appendChild(head);
+    row.appendChild(el('pre', 'rep-body', it.content || ''));
+    box.appendChild(row);
+  });
 }
 
 /* ---------------- 选集 ---------------- */
@@ -1324,9 +1531,19 @@ function switchTab(name) {
   if (name === 'browse' && !browse.loaded) { browse.loaded = true; applyBrowse(); }
   if (name === 'timeline' && !tl.loaded) { tl.loaded = true; applyTimeline(); }
   if (name === 'selection') loadSelection().catch((e) => toast('选集加载失败: ' + e.message));
-  if (name === 'analysis' && !ana.loaded) {
-    ana.loaded = true;
-    loadAnalysis().catch((e) => toast('分析加载失败: ' + e.message));
+  if (name === 'analysis') {
+    if (!ana.loaded) {
+      ana.loaded = true;
+      loadAnalysis().catch((e) => toast('分析加载失败: ' + e.message));
+    }
+    scheduleAnaRefresh();
+  } else if (anaTimer) {
+    clearTimeout(anaTimer);
+    anaTimer = null;
+  }
+  if (name === 'llm' && !llmUI.loaded) {
+    llmUI.loaded = true;
+    Promise.all([loadLlm(), loadReports()]).catch((e) => toast('智能加载失败: ' + e.message));
   }
   if (name === 'search') setTimeout(() => $('#searchQ').focus(), 0);
 }
@@ -1378,6 +1595,21 @@ function init() {
   $('#anaApply').onclick = applyAnaFilters;
   $('#anaAll').onclick = () => { $('#anaFrom').value = ''; $('#anaTo').value = ''; applyAnaFilters(); };
   loadTiers().catch(() => {});
+
+  // 智能
+  $('#llmPreset').onchange = () => {
+    const p = llmUI.presets.find((x) => x.name === $('#llmPreset').value);
+    if (p) {
+      $('#llmBase').value = p.base_url || '';
+      $('#llmModel').value = p.model || '';
+      $('#llmKeyEnv').value = p.api_key_env || '';
+    }
+  };
+  $('#llmSave').onclick = () => saveLlm().catch((e) => toast('保存失败: ' + e.message));
+  $('#llmPreview').onclick = () => previewInterpret().catch((e) => toast('取材失败: ' + e.message));
+  $('#llmRun').onclick = () => runInterpret().catch((e) => toast('解读失败: ' + e.message));
+  $('#llmStop').onclick = () => { if (llmUI.controller) llmUI.controller.abort(); };
+  $('#llmSaveRep').onclick = () => saveReport().catch((e) => toast('保存失败: ' + e.message));
 
   // 选集
   $('#selColl').addEventListener('change', () => {

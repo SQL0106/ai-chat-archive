@@ -2,8 +2,11 @@
 raw/
 out/
 
-# 选集状态：个人数据
+# 选集状态 / 分析结果 / 敏感词库：个人数据，不传
 work/
+
+# 第三方敏感词库（体积大，用 scripts/fetch_lexicon.sh 自行拉取）
+third_party/
 
 # Python
 __pycache__/

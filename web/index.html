@@ -16,6 +16,7 @@
     <button class="tab" data-tab="search">搜索</button>
     <button class="tab" data-tab="timeline">时间线</button>
     <button class="tab" data-tab="analysis">分析</button>
+    <button class="tab" data-tab="llm">智能</button>
     <button class="tab" data-tab="selection">选集</button>
   </nav>
   <div class="jumpbox">
@@ -238,6 +239,7 @@
     <div class="page">
       <div id="anaStatus" class="cards"></div>
       <p id="anaHint" class="hint hidden"></p>
+      <div id="anaRun" class="ana-run hidden"></div>
 
       <div class="filters">
         <input type="date" id="anaFrom" title="起始日期">
@@ -268,6 +270,63 @@
       <div class="card">
         <h3>价值分层 · 高价值 ≥4 / 一般 =3 / 低价值 ≤2</h3>
         <div id="anaTiers" class="tier-cols"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 智能（LLM 接口 + 解读） ============ -->
+  <section id="tab-llm" class="panel">
+    <div class="page">
+      <div class="card">
+        <h3>接口配置 · 兼容 OpenAI（默认 DeepSeek / 智谱），key 只存本机 work/llm.json</h3>
+        <div class="filters">
+          <label class="inline">预设 <select id="llmPreset"></select></label>
+          <label class="inline">模型 <input type="text" id="llmModel" size="18" spellcheck="false" placeholder="deepseek-chat"></label>
+          <label class="inline">温度 <input type="number" id="llmTemp" step="0.1" min="0" max="2" style="width:72px"></label>
+          <label class="inline">max_tokens <input type="number" id="llmMax" min="1" step="64" style="width:96px"></label>
+        </div>
+        <div class="filters">
+          <label class="inline grow">base_url <input type="text" id="llmBase" spellcheck="false" placeholder="https://api.deepseek.com/v1"></label>
+        </div>
+        <div class="filters">
+          <label class="inline grow">API Key <input type="password" id="llmKey" spellcheck="false" placeholder="留空表示不改动已存的 key"></label>
+          <label class="inline">env 名 <input type="text" id="llmKeyEnv" size="18" spellcheck="false" placeholder="DEEPSEEK_API_KEY"></label>
+          <label class="inline"><input type="checkbox" id="llmRemoveKey"> 清除已存 key</label>
+          <button id="llmSave" class="primary">保存配置</button>
+        </div>
+        <p id="llmState" class="hint"></p>
+      </div>
+
+      <div class="card">
+        <h3>智能解读 · 默认只取「值得分析的情感」，且已做敏感词 / 个人信息脱敏</h3>
+        <div class="filters">
+          <label class="inline">数据源
+            <select id="llmScope">
+              <option value="emotion">值得分析的情感（推荐）</option>
+              <option value="high">高价值对话</option>
+              <option value="collection">当前选集</option>
+              <option value="recent">最近对话</option>
+              <option value="all">全部（按价值）</option>
+            </select>
+          </label>
+          <label class="inline">取材条数 <input type="number" id="llmLimit" value="20" min="1" max="60" style="width:72px"></label>
+          <button id="llmPreview">预览取材</button>
+          <span id="llmMeta" class="count"></span>
+        </div>
+        <textarea id="llmPrompt" rows="3" placeholder="想让我分析什么？例如：总结这段时间我的情绪变化，指出反复出现的压力来源。"></textarea>
+        <div class="filters">
+          <button id="llmRun" class="primary">开始解读</button>
+          <button id="llmStop" disabled>停止</button>
+          <button id="llmSaveRep">保存解读</button>
+          <span class="spacer"></span>
+          <span id="llmOutMeta" class="count"></span>
+        </div>
+        <div id="llmOut" class="llm-out"></div>
+      </div>
+
+      <div class="card">
+        <h3>已保存的解读</h3>
+        <div id="repList" class="rep-list"></div>
       </div>
     </div>
   </section>

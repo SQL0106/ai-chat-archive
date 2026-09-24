@@ -192,6 +192,64 @@ def describe(cfg=None):
     }
 
 
+# 预设的展示名，给网页端下拉框用。
+PRESET_LABELS = {
+    "deepseek": "DeepSeek（deepseek-chat）",
+    "zhipu": "智谱 GLM-4.7-Flash（免费）",
+}
+
+
+def presets():
+    """给网页端用的预设列表（不含任何 key）。"""
+    out = []
+    for name, p in PRESETS.items():
+        out.append({
+            "name": name,
+            "label": PRESET_LABELS.get(name, name),
+            "base_url": p.get("base_url"),
+            "model": p.get("model"),
+            "api_key_env": p.get("api_key_env"),
+            "docs": p.get("docs"),
+        })
+    return out
+
+
+def save_config(updates, path=None):
+    """把 updates 合并进工作目录的 llm.json（原子写入，权限 600）。
+
+    只接受已知字段；值为 None 的键会被忽略。空字符串的 api_key 会删除该键
+    （等价于「清除已保存的 key」）。绝不回传 key 内容。
+    """
+    p = Path(path) if path else CONFIG_PATH
+    data = {}
+    if p.is_file():
+        try:
+            cur = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(cur, dict):
+                data.update(cur)
+        except (OSError, ValueError):
+            pass
+    allowed = set(DEFAULTS) | {"docs"}
+    for k, v in (updates or {}).items():
+        if k not in allowed or v is None:
+            continue
+        if k == "api_key" and (v == ""):
+            data.pop("api_key", None)
+            continue
+        if k in ("api_key_env", "base_url", "model", "preset") and isinstance(v, str):
+            v = v.strip()
+        data[k] = v
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return p
+
+
 # --------------------------------------------------------------------------
 # 请求
 # --------------------------------------------------------------------------
