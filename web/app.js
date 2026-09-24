@@ -1509,9 +1509,18 @@ function routeFromHash() {
 }
 
 /* ---------------- 按时间跳转 ---------------- */
+function setJumpOpen(open) {
+  const jb = $('#jumpbox');
+  if (!jb) return;
+  jb.classList.toggle('open', open);
+  const t = $('#jumpToggle');
+  if (t) t.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 async function doJump() {
   const v = $('#jumpInput').value;
   if (!v) { toast('请选择日期和时间'); return; }
+  setJumpOpen(false);
   try {
     const d = await api('/api/jump', { ts: v });
     if (d.error) { toast(d.error); return; }
@@ -1527,6 +1536,8 @@ async function doJump() {
 /* ---------------- Tab ---------------- */
 function switchTab(name) {
   $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  const act = $('.tab.active');
+  if (act && act.scrollIntoView) act.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
   if (name === 'browse' && !browse.loaded) { browse.loaded = true; applyBrowse(); }
   if (name === 'timeline' && !tl.loaded) { tl.loaded = true; applyTimeline(); }
@@ -1657,6 +1668,19 @@ function init() {
     p(now.getUTCDate()) + 'T' + p(now.getUTCHours()) + ':' + p(now.getUTCMinutes());
   $('#jumpBtn').onclick = doJump;
   $('#jumpInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') doJump(); });
+  $('#jumpToggle').onclick = (e) => {
+    e.stopPropagation();
+    const open = !$('#jumpbox').classList.contains('open');
+    setJumpOpen(open);
+    if (open) {
+      const inp = $('#jumpInput');
+      try { inp.focus({ preventScroll: true }); } catch (_) { inp.focus(); }
+    }
+  };
+  document.addEventListener('click', (e) => {
+    if ($('#jumpbox').classList.contains('open') && !$('#jumpbox').contains(e.target)) setJumpOpen(false);
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setJumpOpen(false); });
 
   window.addEventListener('hashchange', routeFromHash);
   loadSelection().catch(() => {});

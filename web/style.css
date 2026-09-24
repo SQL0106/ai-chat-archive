@@ -66,18 +66,35 @@ kbd {
 /* ---------- topbar ---------- */
 .topbar {
   flex: 0 0 auto; z-index: 20;
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 8px 16px;
   background: var(--bg2);
   border-bottom: 1px solid var(--line);
 }
-.brand { font-weight: 700; font-size: 15px; letter-spacing: .4px; white-space: nowrap; }
-.tabs { display: flex; gap: 4px; }
-.tab { background: transparent; border-color: transparent; color: var(--muted); padding: 5px 13px; }
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 700; font-size: 15px; letter-spacing: .3px; white-space: nowrap;
+}
+.brand::before {
+  content: ""; width: 9px; height: 9px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  box-shadow: 0 0 9px rgba(76, 154, 255, .55);
+}
+.tabs {
+  display: flex; gap: 3px; flex-wrap: wrap;
+  padding: 3px; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.tab {
+  background: transparent; border-color: transparent; color: var(--muted);
+  padding: 5px 13px; border-radius: 7px;
+}
 .tab:hover { color: var(--fg); background: var(--bg3); }
 .tab.active { color: #04121f; background: var(--accent); border-color: var(--accent); font-weight: 600; }
-.jumpbox { margin-left: auto; display: flex; gap: 6px; align-items: center; }
-.jumpbox input { width: 200px; }
+.jumpbox { margin-left: auto; display: flex; gap: 6px; align-items: center; position: relative; }
+.jump-panel { display: flex; gap: 6px; align-items: center; }
+.jumpbox input[type="datetime-local"] { width: 200px; }
+.jump-toggle { display: none; align-items: center; gap: 6px; }
 
 /* ---------- layout ---------- */
 main { flex: 1 1 auto; min-height: 0; position: relative; }
@@ -454,8 +471,31 @@ mark.current { background: var(--accent); color: #04121f; }
   .pane-reader { display: none; }
   .split.reading .pane-list { display: none; }
   .split.reading .pane-reader { display: flex; flex: 1 1 auto; }
-  .jumpbox input { width: 150px; }
+  /* 顶栏：标签横向滑动，时间跳转收进弹出层，永远只占一行。 */
+  .topbar { flex-wrap: nowrap; gap: 8px; padding: 7px 8px; }
   .brand { display: none; }
+  .tabs {
+    flex: 1 1 auto; min-width: 0;
+    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent);
+            mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent);
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { flex: 0 0 auto; padding: 6px 12px; }
+  .jumpbox { margin-left: 0; flex: 0 0 auto; }
+  .jump-toggle { display: inline-flex; padding: 6px 9px; }
+  .jump-toggle span { display: none; }
+  .jump-panel {
+    position: absolute; right: 0; top: calc(100% + 8px);
+    flex-direction: column; align-items: stretch; min-width: 234px;
+    padding: 8px; gap: 6px; display: none;
+    background: var(--bg2); border: 1px solid var(--line2);
+    border-radius: 10px; box-shadow: 0 14px 34px rgba(0, 0, 0, .5);
+  }
+  .jumpbox.open .jump-panel { display: flex; }
+  .jump-panel input[type="datetime-local"] { width: 100%; }
+  .jump-panel button { width: 100%; }
   /* 窄屏顶栏（标题 + 来源/条数/字数/创建/更新/ID）会折成好几行，
      钉死在顶部太占地方，所以改成整个阅读器一起滚、顶栏随内容滚走。 */
   .reader { overflow-y: auto; }

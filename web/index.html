@@ -10,7 +10,7 @@
 
 <header class="topbar">
   <div class="brand">AI 聊天归档</div>
-  <nav class="tabs">
+  <nav class="tabs" id="tabs">
     <button class="tab active" data-tab="stats">统计</button>
     <button class="tab" data-tab="browse">浏览</button>
     <button class="tab" data-tab="search">搜索</button>
@@ -19,9 +19,15 @@
     <button class="tab" data-tab="llm">智能</button>
     <button class="tab" data-tab="selection">选集</button>
   </nav>
-  <div class="jumpbox">
-    <input type="datetime-local" id="jumpInput" step="1" title="按日期时间跳转">
-    <button id="jumpBtn" class="primary">跳转</button>
+  <div class="jumpbox" id="jumpbox">
+    <button id="jumpToggle" class="jump-toggle" type="button" aria-label="按日期时间跳转" aria-expanded="false" title="按日期时间跳转">
+      <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>
+      <span>时间跳转</span>
+    </button>
+    <div class="jump-panel">
+      <input type="datetime-local" id="jumpInput" step="1" title="按日期时间跳转">
+      <button id="jumpBtn" class="primary">跳转</button>
+    </div>
   </div>
 </header>
 
