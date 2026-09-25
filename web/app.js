@@ -1616,6 +1616,46 @@ async function doJump() {
   }
 }
 
+/* ---------------- 主题（深/浅色，自动跟随系统） ---------------- */
+const THEME_MODES = ['auto', 'light', 'dark'];
+const THEME_LABELS = { auto: '自动', light: '浅色', dark: '深色' };
+const themeState = { mode: 'auto' };
+
+function systemTheme() {
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function applyTheme() {
+  const mode = themeState.mode;
+  const t = mode === 'auto' ? systemTheme() : mode;
+  document.documentElement.setAttribute('data-theme', t);
+  const lab = $('#themeLabel');
+  if (lab) lab.textContent = THEME_LABELS[mode];
+  const btn = $('#themeBtn');
+  if (btn) btn.title = '外观：' + THEME_LABELS[mode] +
+    (mode === 'auto' ? '（跟随系统）' : '') + ' · 点击切换 自动 → 浅色 → 深色';
+}
+
+function initTheme() {
+  try {
+    const s = localStorage.getItem('themeMode');
+    if (s && THEME_MODES.indexOf(s) >= 0) themeState.mode = s;
+  } catch (e) { /* 隐私模式忽略 */ }
+  const mq = window.matchMedia('(prefers-color-scheme: light)');
+  const onSys = () => { if (themeState.mode === 'auto') applyTheme(); };
+  if (mq.addEventListener) mq.addEventListener('change', onSys);
+  else if (mq.addListener) mq.addListener(onSys);
+  applyTheme();
+}
+
+function cycleTheme() {
+  const next = THEME_MODES[(THEME_MODES.indexOf(themeState.mode) + 1) % THEME_MODES.length];
+  themeState.mode = next;
+  try { localStorage.setItem('themeMode', next); } catch (e) { /* 隐私模式忽略 */ }
+  applyTheme();
+  toast('外观：' + THEME_LABELS[next] + (next === 'auto' ? '（跟随系统）' : ''));
+}
+
 /* ---------------- Tab ---------------- */
 function switchTab(name) {
   $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
@@ -1644,6 +1684,8 @@ function switchTab(name) {
 
 /* ---------------- 初始化 ---------------- */
 function init() {
+  initTheme();
+  $('#themeBtn').onclick = cycleTheme;
   $$('.tab').forEach((b) => { b.onclick = () => switchTab(b.dataset.tab); });
 
   setupFolds();

@@ -4,6 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI 聊天归档</title>
+<script>
+/* 主题：auto 跟随系统，light/dark 固定；在样式应用前先设置，避免闪烁 */
+try {
+  var _m = localStorage.getItem('themeMode') || 'auto';
+  var _t = _m === 'auto'
+    ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+    : _m;
+  document.documentElement.setAttribute('data-theme', _t);
+} catch (e) {}
+</script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -29,6 +39,9 @@
       <button id="jumpBtn" class="primary">跳转</button>
     </div>
   </div>
+  <button id="themeBtn" class="theme-btn" type="button" title="外观：自动（点击切换 自动 → 浅色 → 深色）">
+    <span id="themeLabel">自动</span>
+  </button>
 </header>
 
 <main>
