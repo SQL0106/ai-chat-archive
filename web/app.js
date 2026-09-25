@@ -729,7 +729,7 @@ const EMOTION_COLORS = {
   anger: '#f87171', sadness: '#a78bfa', fatigue: '#94a3b8',
 };
 let anaEmotionLabels = { joy: '喜悦', calm: '平静', anxiety: '焦虑', anger: '愤怒', sadness: '低落', fatigue: '疲惫' };
-const ana = { from: '', to: '', loaded: false, pending: 0, weeks: [], tiers: { high: [], mid: [], low: [] } };
+const ana = { from: '', to: '', loaded: false, pending: 0, jobRunning: false, weeks: [], tiers: { high: [], mid: [], low: [] } };
 let anaValueMap = {};
 let anaTimer = null;
 
@@ -926,6 +926,59 @@ async function loadAnaStatus() {
     + (cfg.docs ? ' · 文档 ' + cfg.docs : '');
   ana.pending = s.pending || 0;
   renderAnaRun(s);
+  renderAnaJob(d.run);
+}
+
+function renderAnaJob(run) {
+  const box = $('#anaJob');
+  if (!box) return;
+  if (!run || (!run.running && !run.finished)) {
+    ana.jobRunning = false;
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  ana.jobRunning = !!run.running;
+  box.classList.remove('hidden');
+  box.innerHTML = '';
+  const total = run.total || 0;
+  const i = Math.min(run.i || 0, total || Infinity);
+  const pct = total ? (i / total * 100) : 0;
+  const bar = el('div', 'ana-bar');
+  const fill = el('div', 'ana-fill');
+  fill.style.width = pct.toFixed(2) + '%';
+  bar.appendChild(fill);
+  box.appendChild(bar);
+  const line = el('div', 'ana-run-line');
+  let head;
+  if (run.running && run.stale) {
+    head = '分析任务无响应（' + (run.age_s != null ? Math.round(run.age_s) + ' 秒' : '') + '未更新）';
+  } else if (run.running) {
+    head = '分析任务运行中';
+  } else {
+    head = '分析任务已结束';
+  }
+  let txt = head + ' · 第 ' + fmtNum(i) + ' / ' + fmtNum(total)
+    + '（' + pct.toFixed(2) + '%）'
+    + ' · 成功 ' + fmtNum(run.ok || 0) + ' · 失败 ' + fmtNum(run.fail || 0)
+    + ' · 花费 ¥' + Number(run.cost || 0).toFixed(2);
+  if (run.model) txt += ' · ' + run.model;
+  if (run.title) txt += ' · 当前 ' + run.title;
+  if (run.elapsed_s != null) txt += ' · 已用 ' + fmtDuration(run.elapsed_s);
+  if (run.error && run.running) txt += ' · 最近错误 ' + run.error;
+  txt += run.running ? ' · 每 5 秒自动刷新' : (run.ended_at ? ' · 结束于 ' + run.ended_at : '');
+  line.textContent = txt;
+  box.appendChild(line);
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(Number(sec) || 0));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h) return h + ' 小时 ' + m + ' 分';
+  if (m) return m + ' 分 ' + s + ' 秒';
+  return s + ' 秒';
 }
 
 function renderAnaRun(s) {
@@ -965,8 +1018,8 @@ function scheduleAnaRefresh() {
   if (!panel || !panel.classList.contains('active')) return;
   anaTimer = setTimeout(async () => {
     try { await loadAnaStatus(); } catch (e) { /* 忽略刷新失败 */ }
-    if (ana.llmRemaining > 0) scheduleAnaRefresh();
-  }, 15000);
+    if (ana.llmRemaining > 0 || ana.jobRunning) scheduleAnaRefresh();
+  }, ana.jobRunning ? 5000 : 15000);
 }
 
 async function loadEmotion() {

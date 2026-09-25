@@ -20,7 +20,9 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -35,6 +37,7 @@ import llm  # noqa: E402
 BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
+YELLOW = "\033[33m"
 
 CONFIG_TEMPLATE = {
     "preset": "deepseek",
@@ -95,10 +98,56 @@ def _targets(args):
         raise
 
 
+TOPIC_PRESETS = {
+    "self-psych": (
+        r"心理|情绪|焦虑|抑郁|自卑|内耗|社恐|社交恐惧|强迫|创伤|原生家庭|"
+        r"潜意识|咨询师|孤独|崩溃|躁郁|双相|精神科|自我怀疑|讨好型|安全感|"
+        r"想哭|难过|痛苦|委屈|沮丧|空虚|迷茫|失眠|睡不着|压力|害怕|不安"
+    ),
+}
+
+
+def _topic_rows(conn, aconn, rows, topic):
+    """按主题筛：标题+首条用户消息命中关键词，或启发式分类为「情绪」。"""
+    pattern = TOPIC_PRESETS.get(topic, topic)
+    pat = re.compile(pattern, re.I)
+    first = {}
+    for cid, text in conn.execute(
+            "SELECT conversation_id, text FROM messages WHERE role = 'user'"
+            " ORDER BY conversation_id, message_index"):
+        if cid not in first:
+            first[cid] = text or ""
+    try:
+        emo = {r[0] for r in aconn.execute(
+            "SELECT conversation_id FROM analysis WHERE kind = '情绪'")}
+    except Exception:  # noqa: BLE001
+        emo = set()
+    keep, hit_kw, hit_emo = [], 0, 0
+    for r in rows:
+        cid = r["conversation_id"]
+        kw = bool(pat.search((r.get("title") or "") + "\n" + first.get(cid, "")[:800]))
+        eh = cid in emo
+        if kw or eh:
+            keep.append(r)
+            hit_kw += int(kw)
+            hit_emo += int(eh)
+    print("%s主题过滤 %s%s：关键词命中 %d、启发式情绪 %d → 保留 %d / %d" % (
+        DIM, topic, RESET, hit_kw, hit_emo, len(keep), len(rows)), flush=True)
+    return keep
+
+
 def _select_pending(conn, rows, args):
     aconn = analysis.open_analysis_db(args.analysis_db)
+    topic = getattr(args, "topic", "")
     try:
-        done = analysis.analyzed_ids(aconn)
+        if topic:
+            rows = _topic_rows(conn, aconn, rows, topic)
+            # 主题模式下，启发式结果不算「已分析」，只跳过真跑过 LLM 的
+            done = {r[0] for r in aconn.execute(
+                "SELECT conversation_id FROM analysis"
+                " WHERE COALESCE(model, '') <> 'heuristic'")}
+        else:
+            done = analysis.analyzed_ids(aconn)
     finally:
         aconn.close()
     if getattr(args, "force", False):
@@ -169,6 +218,23 @@ def cmd_estimate(a):
     return 0
 
 
+def _progress_path(a):
+    base = Path(a.analysis_db) if a.analysis_db else Path(arclib.DEFAULT_WORK) / "analysis.sqlite"
+    return base.parent / "analysis_progress.json"
+
+
+def _write_progress(path, **fields):
+    """原子写进度文件，供网页 /api/analysis 展示；任何失败都不影响分析本身。"""
+    try:
+        payload = dict(fields)
+        payload["updated"] = arclib.now_iso()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
 def cmd_run(a):
     cfg = llm.load_config(a.config)
     if not llm.has_key(cfg):
@@ -180,55 +246,130 @@ def cmd_run(a):
     if a.limit:
         pending = pending[:a.limit]
     total = len(pending)
-    print("%s开始分析 %d 个对话%s（模型 %s）" % (BOLD, total, RESET, cfg.get("model")))
+    print("%s开始分析 %d 个对话%s（模型 %s）" % (BOLD, total, RESET, cfg.get("model")),
+          flush=True)
     ok = fail = 0
     cost = 0.0
     t0 = time.time()
+    prog = _progress_path(a)
+    started = arclib.now_iso()
+    state = {"running": True, "finished": False, "started": started,
+             "i": 0, "total": total, "ok": 0, "fail": 0, "cost": 0.0,
+             "model": cfg.get("model"), "title": "", "elapsed_s": 0.0}
+    _write_progress(prog, **state)
+    stop = threading.Event()
+
+    def _beat():
+        while not stop.wait(20):
+            state["elapsed_s"] = round(time.time() - t0, 1)
+            _write_progress(prog, **state)
+
+    threading.Thread(target=_beat, daemon=True).start()
+    rl_streak = 0
+    stop_fail = 0
+    stop_now = False
+    rate_exit = False
+    idx = 0
     try:
-        for i, r in enumerate(pending, 1):
+        while idx < len(pending):
+            r = pending[idx]
             cid = r["conversation_id"]
             digest = analysis.build_digest(conn, cid)
             if not digest:
+                idx += 1
                 continue
             if a.dry_run:
-                print(json.dumps(digest, ensure_ascii=False)[:800])
-                print("--- dry-run，只看了第一个就停 ---")
+                print(json.dumps(digest, ensure_ascii=False)[:800], flush=True)
+                print("--- dry-run，只看了第一个就停 ---", flush=True)
                 break
-            try:
-                obj, res = llm.chat_json(analysis.build_messages(digest), cfg=cfg)
-                rec = analysis.normalize_result(obj, cid, digest)
-                usage = res.get("usage") or {}
-                rec["model"] = res.get("model")
-                rec["analyzed_at"] = arclib.now_iso()
-                rec["prompt_tokens"] = usage.get("prompt_tokens")
-                rec["completion_tokens"] = usage.get("completion_tokens")
-                c = llm.estimate_cost(usage, res.get("model"))
-                rec["cost"] = c
-                if c:
-                    cost += c
-                analysis.upsert(aconn, rec)
-                ok += 1
-                print("[%d/%d] v=%d %-6s %s  %s" % (
-                    i, total, rec["value"], rec["kind"],
-                    _clip(digest.get("title"), 28),
-                    _clip(rec.get("summary"), 40)))
-            except Exception as e:  # noqa: BLE001
-                fail += 1
-                analysis.record_error(aconn, cid, cfg.get("model"), e)
-                print("[%d/%d] %s失败%s %s" % (i, total, DIM, RESET, _clip(str(e), 120)))
-                if a.stop_after_errors and fail >= a.stop_after_errors:
-                    print("连续失败达到上限，停止。")
+            i = idx + 1
+            state.update(i=i, title=_clip(digest.get("title"), 40),
+                         elapsed_s=round(time.time() - t0, 1))
+            _write_progress(prog, **state)
+            attempts = 0
+            while True:
+                try:
+                    obj, res = llm.chat_json(analysis.build_messages(digest), cfg=cfg)
+                    rec = analysis.normalize_result(obj, cid, digest)
+                    usage = res.get("usage") or {}
+                    rec["model"] = res.get("model")
+                    rec["analyzed_at"] = arclib.now_iso()
+                    rec["prompt_tokens"] = usage.get("prompt_tokens")
+                    rec["completion_tokens"] = usage.get("completion_tokens")
+                    c = llm.estimate_cost(usage, res.get("model"))
+                    rec["cost"] = c
+                    if c:
+                        cost += c
+                    analysis.upsert(aconn, rec)
+                    ok += 1
+                    rl_streak = 0
+                    idx += 1
+                    state.update(ok=ok, fail=fail, cost=round(cost, 4),
+                                 elapsed_s=round(time.time() - t0, 1))
+                    _write_progress(prog, **state)
+                    print("[%d/%d] v=%d %-6s %s  %s" % (
+                        i, total, rec["value"], rec["kind"],
+                        _clip(digest.get("title"), 28),
+                        _clip(rec.get("summary"), 40)), flush=True)
                     break
+                except Exception as e:  # noqa: BLE001
+                    rl = _rate_limited(e)
+                    if rl and attempts < a.rate_retries:
+                        attempts += 1
+                        rl_streak += 1
+                        wait = min(a.rate_backoff * (2 ** (rl_streak - 1)),
+                                   a.rate_backoff_max)
+                        msg = ("限流第 %d 次，%d 秒后重来（本条重试 %d/%d）"
+                               % (rl_streak, int(wait), attempts, a.rate_retries))
+                        state.update(ok=ok, fail=fail,
+                                     elapsed_s=round(time.time() - t0, 1),
+                                     error=_clip(msg, 120))
+                        _write_progress(prog, **state)
+                        print("[%d/%d] %s%s%s" % (i, total, YELLOW, msg, RESET),
+                              flush=True)
+                        time.sleep(wait)
+                        continue
+                    fail += 1
+                    if rl:
+                        rate_exit = True
+                    fl = _filtered(e)
+                    analysis.record_error(aconn, cid, cfg.get("model"), e)
+                    state.update(ok=ok, fail=fail, elapsed_s=round(time.time() - t0, 1),
+                                 error=_clip(str(e), 120))
+                    _write_progress(prog, **state)
+                    if fl:
+                        print("[%d/%d] %s内容过滤，跳过%s %s" % (
+                            i, total, YELLOW, RESET, _clip(str(e), 90)), flush=True)
+                    else:
+                        print("[%d/%d] %s失败%s %s" % (
+                            i, total, DIM, RESET, _clip(str(e), 120)), flush=True)
+                        stop_fail += 1
+                    idx += 1
+                    if a.stop_after_errors and stop_fail >= a.stop_after_errors:
+                        stop_now = True
+                    break
+            if stop_now:
+                break
             if a.sleep:
                 time.sleep(a.sleep)
     except KeyboardInterrupt:
-        print("\n已中断，下次直接重跑即可续上。")
+        print("\n已中断，下次直接重跑即可续上。", flush=True)
     finally:
+        stop.set()
+        state.update(running=False, finished=True, ok=ok, fail=fail,
+                     cost=round(cost, 4), elapsed_s=round(time.time() - t0, 1),
+                     ended_at=arclib.now_iso())
+        _write_progress(prog, **state)
         conn.close()
         aconn.close()
     dt = time.time() - t0
+    if stop_now:
+        print("连续失败达到上限，停止。", flush=True)
     print("%s完成%s 成功 %d / 失败 %d，用时 %.1fs，本次花费 ~¥%.3f" % (
-        BOLD, RESET, ok, fail, dt, cost))
+        BOLD, RESET, ok, fail, dt, cost), flush=True)
+    if stop_now and rate_exit:
+        print("停止原因是限流：退出后由 systemd 30 秒自动重启续跑。", flush=True)
+        return 1
     return 0
 
 
@@ -396,6 +537,18 @@ def _clip(s, n):
     return s if len(s) <= n else s[:n] + "…"
 
 
+def _rate_limited(e):
+    s = str(e)
+    return any(h in s for h in ("429", "1302", "1305", "速率限制",
+                                "访问量过大", "too many requests",
+                                "rate limit"))
+
+
+def _filtered(e):
+    s = str(e)
+    return any(h in s for h in ("1301", "contentFilter", "不安全", "敏感内容"))
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="聊天记录的 LLM 分析工具")
     p.add_argument("--db", default=str(arclib.DEFAULT_DB), help="归档数据库")
@@ -422,6 +575,12 @@ def build_parser():
     r.add_argument("--force", action="store_true", help="已分析的也重跑")
     r.add_argument("--sleep", type=float, default=0.0, help="每次调用之间停几秒")
     r.add_argument("--stop-after-errors", type=int, default=8)
+    r.add_argument("--rate-backoff", type=float, default=30.0,
+                   help="遇到限流的起始等待秒数（按 2^n 倍增）")
+    r.add_argument("--rate-backoff-max", type=float, default=600.0,
+                   help="限流等待秒数上限")
+    r.add_argument("--rate-retries", type=int, default=5,
+                   help="同一条对话被限流时最多重试几次（不计入失败）")
     r.add_argument("--dry-run", action="store_true", help="只打印摘要，不联网")
     r.set_defaults(func=cmd_run)
 
@@ -462,6 +621,9 @@ def _add_filter_args(sp):
     sp.add_argument("--from", dest="from_date", default="")
     sp.add_argument("--to", dest="to_date", default="")
     sp.add_argument("--min-msgs", type=int, default=0)
+    sp.add_argument("--topic", default="",
+                    help="按主题过滤：%s（聊自己/心理），或直接给一段正则" %
+                         "/".join(sorted(TOPIC_PRESETS)))
 
 
 def main(argv=None):

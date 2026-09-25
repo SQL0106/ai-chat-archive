@@ -418,6 +418,35 @@ def _analysis_conn():
     return analysis.open_analysis_db(str(ANALYSIS_DB_PATH), readonly=True)
 
 
+def _analysis_run():
+    """读 tools/analyze.py 写的 work/analysis_progress.json，描述后台分析任务。
+
+    running=true 但超过 90 秒没更新 → alive=False（心跳 20 秒一次，说明任务挂了）。
+    """
+    p = WORK_DIR / "analysis_progress.json"
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    age = None
+    try:
+        ts = datetime.fromisoformat(str(d.get("updated") or ""))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+    except ValueError:
+        pass
+    d["age_s"] = round(age, 1) if age is not None else None
+    running = bool(d.get("running"))
+    d["alive"] = running and (age is None or age <= 90)
+    d["stale"] = running and age is not None and age > 90
+    return d
+
+
 def api_analysis(conn, qs):
     """LLM 分析结果查询。
 
@@ -462,7 +491,7 @@ def api_analysis(conn, qs):
             "SELECT model, COUNT(*) c FROM analysis GROUP BY model")}
         st["llm_analyzed"] = adb.execute(
             "SELECT COUNT(*) c FROM analysis WHERE model<>'heuristic'").fetchone()["c"]
-        return {"available": True, "status": st,
+        return {"available": True, "status": st, "run": _analysis_run(),
                 "config": llm.describe(llm.load_config())}
     finally:
         adb.close()
