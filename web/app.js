@@ -1265,14 +1265,15 @@ async function runInterpret() {
   $('#llmOutMeta').textContent = err ? ('出错: ' + err) : (fmtNum(out.textContent.length) + ' 字');
 }
 
-async function saveReport() {
-  if (!llmUI.report || !llmUI.report.content.trim()) { toast('还没有可保存的解读'); return; }
+async function saveReport(rep) {
+  const body = rep || llmUI.report;
+  if (!body || !body.content || !body.content.trim()) { toast('还没有可保存的解读'); return; }
   const r = await fetch('/api/reports', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(llmUI.report),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   const j = await r.json().catch(() => ({}));
   if (!j.ok) { toast('保存失败: ' + (j.error || r.status)); return; }
-  toast('已保存');
+  toast('已保存（智能标签页可查看）');
   loadReports();
 }
 
@@ -1306,6 +1307,35 @@ async function loadReports() {
     row.appendChild(el('pre', 'rep-body', it.content || ''));
     box.appendChild(row);
   });
+}
+
+/* ---------------- 阶段总结 ---------------- */
+const sumUI = { report: null };
+
+async function runTopicSummary() {
+  const out = $('#sumOut');
+  out.textContent = '生成中…';
+  $('#sumRun').disabled = true;
+  $('#sumSave').disabled = true;
+  try {
+    const d = await api('/api/summary', { topic: $('#sumTopic').value });
+    if (!d.ok) { out.textContent = '⚠ ' + (d.error || '生成失败'); return; }
+    out.textContent = d.content;
+    sumUI.report = {
+      title: d.title, scope: 'topic:' + d.topic, count: d.count,
+      prompt: '主题阶段总结（服务端统计聚合）', content: d.content,
+    };
+    $('#sumMeta').textContent = '命中 ' + d.selected + ' · 分析 ' + d.count +
+      ' · 待分析 ' + d.pending + ' · ' + fmtNum(d.content.length) + ' 字';
+    $('#sumSave').disabled = false;
+  } finally {
+    $('#sumRun').disabled = false;
+  }
+}
+
+async function saveTopicSummary() {
+  if (!sumUI.report) { toast('请先点「生成总结」'); return; }
+  await saveReport(sumUI.report);
 }
 
 /* ---------------- 选集 ---------------- */
@@ -1658,6 +1688,8 @@ function init() {
   // 分析
   $('#anaApply').onclick = applyAnaFilters;
   $('#anaAll').onclick = () => { $('#anaFrom').value = ''; $('#anaTo').value = ''; applyAnaFilters(); };
+  $('#sumRun').onclick = () => runTopicSummary().catch((e) => { $('#sumRun').disabled = false; toast('生成失败: ' + e.message); });
+  $('#sumSave').onclick = () => saveTopicSummary().catch((e) => toast('保存失败: ' + e.message));
   loadTiers().catch(() => {});
 
   // 智能

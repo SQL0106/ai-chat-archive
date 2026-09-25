@@ -278,6 +278,22 @@
         <h3>价值分层 · 高价值 ≥4 / 一般 =3 / 低价值 ≤2</h3>
         <div id="anaTiers" class="tier-cols"></div>
       </div>
+
+      <div class="card">
+        <h3>阶段总结 · 按主题口径聚合生成一段解读，可保存为历史解读（本地统计，不联网）</h3>
+        <div class="filters">
+          <label class="inline">主题
+            <select id="sumTopic">
+              <option value="self-psych">心理与自我主题</option>
+            </select>
+          </label>
+          <button id="sumRun" class="primary">生成总结</button>
+          <button id="sumSave" disabled>保存为解读</button>
+          <span class="spacer"></span>
+          <span id="sumMeta" class="count"></span>
+        </div>
+        <div id="sumOut" class="llm-out"></div>
+      </div>
     </div>
   </section>
 

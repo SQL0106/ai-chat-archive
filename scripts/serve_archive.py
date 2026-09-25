@@ -23,6 +23,7 @@
     POST /api/llm/config      保存 LLM 接口配置到 work/llm.json
     GET /api/interpret        装配「值得分析的情感」语料（脱敏，供解读用）
     POST /api/llm             转发到上游 /chat/completions（stream=true 时 SSE 流式）
+    GET  /api/summary         主题阶段总结（按主题口径聚合分析结果，确定性生成）
     GET  /api/reports         已保存的智能解读列表
     POST /api/reports         保存 / 删除一条智能解读 (remove=id)
 
@@ -517,6 +518,308 @@ def api_emotion(conn, qs):
 
 
 # --------------------------------------------------------------------------
+# 主题阶段总结（确定性统计聚合，不联网）
+# --------------------------------------------------------------------------
+
+SUMMARY_TOPICS = {
+    "self-psych": "心理与自我主题",
+}
+SUMMARY_TITLE_KWS = ["抑郁", "分析", "存在", "哲学", "睡不着", "情绪",
+                     "死", "焦虑", "自我", "失眠", "创伤", "压力"]
+SUMMARY_REASON_KWS = ["心理", "深度", "知识", "哲学", "防御", "创伤",
+                      "失眠", "情绪宣泄", "一次"]
+SUMMARY_SLEEP_KWS = ["睡眠", "睡不着", "失眠"]
+
+
+def _topic_rows(conn, adb, topic):
+    """与 tools/analyze.py 同口径：标题+首条用户消息命中主题词，或 kind='情绪'。"""
+    if topic not in SUMMARY_TOPICS:
+        return None, "未知主题: %s" % topic
+    try:
+        import analyze as analyze_cli  # noqa: PLC0415  (tools/analyze.py)
+        pattern = analyze_cli.TOPIC_PRESETS.get(topic)
+    except Exception:  # noqa: BLE001
+        pattern = None
+    if not pattern:
+        return None, "未知主题: %s" % topic
+    pat = re.compile(pattern, re.I)
+    first = {}
+    for cid, text in conn.execute(
+            "SELECT conversation_id, text FROM messages WHERE role = 'user'"
+            " ORDER BY conversation_id, message_index"):
+        if cid not in first:
+            first[cid] = text or ""
+    try:
+        emo = {r[0] for r in adb.execute(
+            "SELECT conversation_id FROM analysis WHERE kind = '情绪'")}
+    except Exception:  # noqa: BLE001
+        emo = set()
+    ids, hit_kw, hit_emo = [], 0, 0
+    for cid, title in conn.execute(
+            "SELECT conversation_id, title FROM conversations ORDER BY created_at"):
+        kw = bool(pat.search((title or "") + "\n" + first.get(cid, "")[:800]))
+        eh = cid in emo
+        if kw or eh:
+            ids.append(cid)
+            hit_kw += int(kw)
+            hit_emo += int(eh)
+    return {"ids": ids, "hit_kw": hit_kw, "hit_emo": hit_emo}, None
+
+
+def _topic_summary_text(topic, stats, extra):
+    """把统计结果渲染成一段可直接阅读/保存的中文解读。"""
+    label = SUMMARY_TOPICS[topic]
+    L = []
+    add = L.append
+    add("【%s · 阶段总结】" % label)
+    add("口径：按「%s」主题口径（标题/首条消息关键词命中，或启发式分类为情绪类）"
+        "从分析库聚合，共命中 %d 条对话，完成 LLM 分析 %d 条，未分析 %d 条。"
+        % (topic, stats["selected"], stats["n"], stats["pending"]))
+    add("")
+    add("一、总量与性质")
+    add("· 价值均值 %.2f / 5；值得保留 %d 条（%.0f%%）。"
+        % (stats["value_mean"], stats["keep_n"], stats["keep_rate"] * 100))
+    add("· 价值分布：5 分 %d、4 分 %d、3 分 %d、2 分 %d、1 分 %d。"
+        % tuple(stats["value_dist"][v] for v in (5, 4, 3, 2, 1)))
+    add("· 类型分布：%s。" % "、".join(
+        "%s %d（%s）" % (k, c, ("%.1f%%" if c * 100.0 / stats["n"] < 1 else "%.0f%%")
+                          % (c * 100.0 / stats["n"])) for k, c in stats["kinds"]))
+    add("· 按类型均值：%s。" % "、".join(stats["kind_means"]))
+    add("· 评分理由高频词：%s → 主体是「把自身状态理论化」的认知性自我剖析，"
+        "而非单纯宣泄。" % "、".join(
+            "%s %d" % (k, c) for k, c in stats["reason_kws"]))
+    add("")
+    add("二、情绪指标（0-1 均值）")
+    add("· %s。" % stats["emo_line"])
+    add("· 强度均值 %.2f（最高 %.2f），总体 sentiment %+.2f。"
+        % (stats["intensity_mean"], stats["intensity_max"], stats["sentiment_mean"]))
+    add("· 情绪类对话 sentiment %+.2f，非情绪类 %+.2f —— 谈情绪时明显更低落。"
+        % (stats["emo_kind_sent"], stats["other_kind_sent"]))
+    add("")
+    add("三、时间趋势")
+    for line in stats["trend_lines"]:
+        add("· " + line)
+    add("· 月度条数：%s。" % stats["month_counts_line"])
+    add("· 低落对话（sentiment < -0.3）共 %d 条，%d 条集中在 %s，%s 单月最多（%d 条）。"
+        % (stats["low_n"], stats["low_in_span"], stats["low_span"],
+           stats["low_peak_month"], stats["low_peak_n"]))
+    add("")
+    add("四、反复出现的主题")
+    add("· 标签 Top：%s。" % "、".join("%s %d" % (k, c) for k, c in stats["topics"]))
+    add("· 标题高频词：%s。" % "、".join(
+        "%s %d" % (k, c) for k, c in stats["title_kws"]))
+    add("")
+    add("五、注意点")
+    for i, line in enumerate(stats["notes"], 1):
+        add("%d. %s" % (i, line))
+    add("")
+    add("六、口径说明")
+    add("· 模型打分，只反映对话内容的自我剖析密度与情绪倾向，不构成任何临床判断。")
+    add("· 反复分析自身状态可能自我强化焦虑，建议留白、把结论落到具体行动上。")
+    add("· 生成于 %s（服务端统计，不联网）。" % extra["now"])
+    return "\n".join(L)
+
+
+def api_topic_summary(conn, qs):
+    """主题阶段总结：按主题口径聚合分析结果，生成文字解读（确定性、不联网）。
+
+    ?topic=self-psych   主题（默认）
+    """
+    from collections import Counter  # noqa: PLC0415
+
+    topic = (qs.get("topic", [""])[0] or "self-psych").strip()
+    adb = _analysis_conn()
+    if adb is None:
+        return {"ok": False,
+                "error": "还没有分析数据，先跑 python3 tools/analyze.py run"}
+    try:
+        sel, err = _topic_rows(conn, adb, topic)
+        if err:
+            return {"ok": False, "error": err}
+        ids = sel["ids"]
+        if not ids:
+            return {"ok": False, "error": "主题 %s 没有命中任何对话" % topic}
+        ph = ",".join("?" * len(ids))
+        rows = [dict(r) for r in adb.execute(
+            "SELECT * FROM analysis WHERE conversation_id IN (%s)" % ph, ids)]
+        for r in rows:  # topics / emotions 在库里是 JSON 字符串
+            for k, fb in (("topics", []), ("emotions", {})):
+                v = r.get(k)
+                if isinstance(v, str):
+                    try:
+                        r[k] = json.loads(v)
+                    except ValueError:
+                        r[k] = fb
+        recs = [r for r in rows if (r.get("model") or "") != "heuristic"]
+        pending = len(ids) - len(recs)
+        if not recs:
+            return {"ok": False, "error": "该主题还没有 LLM 分析结果"}
+        n = len(recs)
+        vals = [int(r.get("value") or 0) for r in recs]
+        vdist = Counter(vals)
+        keep_n = sum(1 for r in recs if r.get("keep"))
+        kind_c = Counter((r.get("kind") or "其他") for r in recs)
+        kinds = kind_c.most_common(6)
+        kind_means = []
+        for k, _c in kinds:
+            kv = [int(r.get("value") or 0) for r in recs
+                  if (r.get("kind") or "其他") == k]
+            kind_means.append("%s %.2f" % (k, sum(kv) / len(kv)))
+        emo_kind = [r for r in recs if (r.get("kind") or "") == "情绪"]
+        other_kind = [r for r in recs if (r.get("kind") or "") != "情绪"]
+        sent = lambda rs: (sum(float(r.get("sentiment") or 0) for r in rs) / len(rs)
+                           if rs else 0.0)  # noqa: E731
+        emo_means = []
+        for e in analysis.EMOTIONS:
+            tot = c = 0.0
+            for r in recs:
+                v = (r.get("emotions") or {}).get(e)
+                if v is not None:
+                    tot += float(v)
+                    c += 1
+            emo_means.append((e, tot / c if c else 0.0))
+        order = sorted(emo_means, key=lambda x: -x[1])
+        emo_line = " > ".join("%s %.2f" % (analysis.EMOTION_LABELS[e], m)
+                              for e, m in order)
+        intens = [float(r.get("intensity") or 0) for r in recs]
+
+        months = {}
+        for r in recs:
+            months.setdefault((r.get("conv_created_at") or "")[:7], []).append(r)
+        def month_mean(key, rs):
+            return (sum(float(r.get(key) or 0) for r in rs) / len(rs)) if rs else 0.0
+        dense = {k: v for k, v in months.items() if k and len(v) >= 5}
+        def emean(month_key, e):
+            rs = dense[month_key]
+            vals2 = [float((r.get("emotions") or {}).get(e) or 0) for r in rs]
+            return sum(vals2) / len(vals2) if vals2 else 0.0
+        first_m = min(dense) if dense else None
+        last_m = max(dense) if dense else None
+        trend = []
+        for e, lab in (("anxiety", "焦虑"), ("fatigue", "疲惫")):
+            if dense:
+                pk = max(dense, key=lambda k: emean(k, e))
+                trend.append("%s：%s %.2f → 峰值 %s %.2f → 最近 %s %.2f"
+                             % (lab, first_m, emean(first_m, e), pk, emean(pk, e),
+                                last_m, emean(last_m, e)))
+        if dense:
+            pk_s = min(dense, key=lambda k: month_mean("sentiment", dense[k]))
+            later = {k: v for k, v in dense.items() if k > pk_s} or dense
+            up = max(later, key=lambda k: month_mean("sentiment", later[k]))
+            trend.append("心情（sentiment）：最早 %s %+.2f → 低谷 %s %+.2f"
+                         " → 回升高点 %s %+.2f → 最近 %s %+.2f"
+                         % (first_m, month_mean("sentiment", dense[first_m]),
+                            pk_s, month_mean("sentiment", dense[pk_s]),
+                            up, month_mean("sentiment", dense[up]),
+                            last_m, month_mean("sentiment", dense[last_m])))
+        mcount = sorted((k, len(v)) for k, v in months.items() if k)
+        month_counts_line = "、".join("%s %d" % (k, c) for k, c in mcount)
+
+        low = [r for r in recs if float(r.get("sentiment") or 0) < -0.3]
+        low_months = Counter((r.get("conv_created_at") or "")[:7] for r in low)
+        if low_months:
+            peak_m = low_months.most_common(1)[0][0]
+            near = [m for m in low_months
+                    if abs(int(m[5:7]) - int(peak_m[5:7])) <= 2
+                    and m[:4] == peak_m[:4]] or [peak_m]
+            span = "%s ~ %s" % (min(near), max(near))
+            in_span = sum(low_months[m] for m in near)
+        else:
+            peak_m = span = "-"
+            in_span = 0
+
+        topics = Counter()
+        for r in recs:
+            for t in (r.get("topics") or []):
+                topics[t] += 1
+        title_kws = [(k, sum(1 for r in recs if k in (r.get("title") or "")))
+                     for k in SUMMARY_TITLE_KWS]
+        title_kws = [(k, c) for k, c in title_kws if c]
+        title_kws.sort(key=lambda x: -x[1])
+        reason_kws = [(k, sum(1 for r in recs
+                              if k in (r.get("value_reason") or "")))
+                      for k in SUMMARY_REASON_KWS]
+        reason_kws = [(k, c) for k, c in reason_kws if c]
+        reason_kws.sort(key=lambda x: -x[1])
+        sleep_n = sum(1 for r in recs
+                      if any(k in (r.get("title") or "") for k in SUMMARY_SLEEP_KWS))
+        psych = re.compile(r"心理|自我|存在|抑郁|焦虑|哲学|情绪|创伤|人格")
+        v5 = [r for r in recs if int(r.get("value") or 0) >= 5]
+        v5.sort(key=lambda r: (0 if psych.search(r.get("title") or "") else 1,
+                               -(int(r.get("value") or 0))))
+        lowv = [r for r in recs if int(r.get("value") or 0) <= 2]
+        try:
+            filtered = adb.execute(
+                "SELECT COUNT(*) c FROM analysis_errors WHERE conversation_id"
+                " IN (%s)" % ph, ids).fetchone()["c"]
+        except Exception:  # noqa: BLE001
+            filtered = 0
+        try:
+            rows_err = adb.execute(
+                "SELECT error FROM analysis_errors WHERE conversation_id IN (%s)"
+                % ph, ids).fetchall()
+            filt_kw = sum(1 for r in rows_err
+                          if re.search(r"1301|内容|content", r["error"] or "", re.I))
+        except Exception:  # noqa: BLE001
+            filt_kw = 0
+
+        notes = []
+        if sleep_n:
+            notes.append("睡眠相关约 %d 条（标题含睡眠/睡不着/失眠），多为低价值求助型话题，"
+                         "情绪上以疲惫为主。" % sleep_n)
+        if dense and low_months:
+            notes.append("%s 是低谷期（低落对话 %d 条集中于此），%s 起心情回升（%s %+.2f → %s %+.2f）。"
+                         % (span, in_span, up,
+                            pk_s, month_mean("sentiment", dense[pk_s]),
+                            up, month_mean("sentiment", dense[up])))
+        if v5:
+            notes.append("高分段集中在「把自身状态理论化」的 %d 条 5 分对话，例如：%s。"
+                         % (len(v5), "、".join(
+                             (r.get("title") or "?")[:24] for r in v5[:8])))
+        if lowv:
+            notes.append("低价值 %d 条（≤2 分）多为失眠求助 / 琐碎查询 / 纯宣泄，"
+                         "例如：%s。" % (len(lowv), "、".join(
+                             (r.get("title") or "?")[:24] for r in lowv[:5])))
+        if filt_kw:
+            notes.append("%d 条对话因上游内容过滤（HTTP 400 code 1301）未能分析，未纳入本总结。"
+                         % filt_kw)
+        elif filtered:
+            notes.append("%d 条对话分析出错未纳入本总结。" % filtered)
+
+        stats = {
+            "selected": len(ids), "n": n, "pending": pending,
+            "value_mean": sum(vals) / n, "value_dist": vdist,
+            "keep_n": keep_n, "keep_rate": keep_n / n,
+            "kinds": kinds, "kind_means": kind_means,
+            "reason_kws": reason_kws[:8],
+            "emo_line": emo_line,
+            "intensity_mean": sum(intens) / n,
+            "intensity_max": max(intens),
+            "sentiment_mean": sent(recs),
+            "emo_kind_sent": sent(emo_kind), "other_kind_sent": sent(other_kind),
+            "trend_lines": trend,
+            "month_counts_line": month_counts_line,
+            "low_n": len(low), "low_in_span": in_span, "low_span": span,
+            "low_peak_month": peak_m,
+            "low_peak_n": low_months.get(peak_m, 0) if low_months else 0,
+            "topics": topics.most_common(12),
+            "title_kws": title_kws[:12],
+            "notes": notes,
+        }
+        extra = {"now": datetime.now(TZ).strftime("%Y-%m-%d %H:%M")}
+        text = _topic_summary_text(topic, stats, extra)
+        return {"ok": True, "topic": topic, "label": SUMMARY_TOPICS[topic],
+                "count": n, "selected": len(ids), "pending": pending,
+                "title": "%s · 阶段总结" % SUMMARY_TOPICS[topic],
+                "content": text,
+                "stats": {"n": n, "value_mean": round(stats["value_mean"], 2),
+                          "keep_rate": round(stats["keep_rate"], 3),
+                          "low_n": len(low), "topics": stats["topics"][:8]}}
+    finally:
+        adb.close()
+
+
+# --------------------------------------------------------------------------
 # LLM 接口配置 / 智能解读 / 已存报告
 # --------------------------------------------------------------------------
 
@@ -864,6 +1167,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(api_day(conn, qs))
             if path == "/api/jump":
                 return self.send_json(api_jump(conn, qs))
+            if path == "/api/summary":
+                return self.send_json(api_topic_summary(conn, qs))
             if path == "/api/analysis":
                 return self.send_json(api_analysis(conn, qs))
             if path == "/api/emotion":
