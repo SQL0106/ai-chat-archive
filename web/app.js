@@ -1708,7 +1708,31 @@ function switchTab(name) {
 }
 
 /* ---------------- 初始化 ---------------- */
+
+// 强制一次重排：复刻“点顶栏”的布局刷新，修复移动端首屏工具栏高度未定型导致无法滚动
+function relayout() {
+  const act = document.querySelector('.panel.active');
+  if (!act) return;
+  const prev = act.style.display;
+  act.style.display = 'none';
+  void act.offsetHeight;
+  act.style.display = prev;
+}
+
+let _issueAt = 0;
+function reportIssue(kind, detail) {
+  try { console.error('[app:' + kind + ']', detail); } catch (_) {}
+  const now = Date.now();
+  if (now - _issueAt < 4000) return;
+  _issueAt = now;
+  const msg = detail && detail.message ? detail.message : String(detail || '未知错误');
+  try { toast('页面出错：' + msg); } catch (_) {}
+}
+
 function init() {
+  window.addEventListener('error', (e) => reportIssue('error', e.error || e.message));
+  window.addEventListener('unhandledrejection', (e) => reportIssue('promise', e.reason));
+
   initTheme();
   $('#themeBtn').onclick = cycleTheme;
   $$('.tab').forEach((b) => { b.onclick = () => switchTab(b.dataset.tab); });
@@ -1837,6 +1861,13 @@ function init() {
   window.addEventListener('hashchange', routeFromHash);
   loadSelection().catch(() => {});
   routeFromHash();
+
+  // 首屏布局刷新：移动端地址栏/工具栏高度定型后重排，修复首屏滑不动
+  const relayoutSoon = () => requestAnimationFrame(() => requestAnimationFrame(relayout));
+  relayoutSoon();
+  window.addEventListener('load', relayoutSoon);
+  window.addEventListener('pageshow', relayoutSoon);
+  window.addEventListener('orientationchange', () => setTimeout(relayout, 300));
 }
 
 document.addEventListener('DOMContentLoaded', init);
