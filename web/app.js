@@ -894,7 +894,7 @@ async function loadAnaStatus() {
   if (!d.available) {
     hint.classList.remove('hidden');
     hint.textContent = d.error || '还没有分析数据。';
-    ['#anaEmoChart', '#anaMoodChart', '#anaValChart', '#anaWeeks', '#anaTiers', '#anaEmoLegend'].forEach((s) => {
+    ['#anaEmoChart', '#anaMoodChart', '#anaValChart', '#anaWeeks', '#anaTiers', '#anaExcluded', '#anaEmoLegend'].forEach((s) => {
       const b = $(s);
       if (b) b.innerHTML = '';
     });
@@ -927,6 +927,31 @@ async function loadAnaStatus() {
   ana.pending = s.pending || 0;
   renderAnaRun(s);
   renderAnaJob(d.run);
+  renderExcluded(s);
+}
+
+function renderExcluded(s) {
+  const box = $('#anaExcluded');
+  if (!box) return;
+  box.innerHTML = '';
+  const recs = (s && s.excluded_records) || [];
+  const n = (s && s.excluded) || 0;
+  if (!n) {
+    box.appendChild(el('div', 'muted', '暂无被排除的对话。'));
+    return;
+  }
+  const head = el('div', 'excluded-head', '共 ' + fmtNum(n) + ' 条 · 已从待分析中剔除，不再重试');
+  box.appendChild(head);
+  recs.forEach((r) => {
+    const row = el('div', 'excluded-row');
+    const t = el('span', 'excluded-title', r.title || '(无标题)');
+    t.title = r.title || '';
+    const meta = el('span', 'excluded-meta',
+      (r.source || '-') + ' · ' + (r.tagged_at || '').slice(0, 10));
+    row.appendChild(t);
+    row.appendChild(meta);
+    box.appendChild(row);
+  });
 }
 
 function renderAnaJob(run) {

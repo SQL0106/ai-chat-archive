@@ -474,6 +474,16 @@ mark.current { background: var(--accent); color: var(--on-accent); }
 }
 .ana-summary { color: var(--fg2); font-size: 12px; flex: 1 1 100%; line-height: 1.6; }
 
+.excluded-list { display: flex; flex-direction: column; gap: 3px; max-height: 420px; overflow-y: auto; }
+.excluded-head { font-size: 12px; color: var(--fg2); margin-bottom: 4px; }
+.excluded-row {
+  display: flex; align-items: baseline; gap: 8px; font-size: 12px;
+  padding: 4px 6px; border-radius: 6px; background: var(--bg2);
+}
+.excluded-title { color: var(--fg); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.excluded-meta { color: var(--fg2); font-size: 11px; flex: 0 0 auto; }
+.muted { color: var(--fg2); font-size: 12px; }
+
 /* ---------- 智能（LLM 接口 + 解读） ---------- */
 #llmPrompt, .filters textarea {
   width: 100%; box-sizing: border-box; margin: 8px 0; padding: 8px 10px;

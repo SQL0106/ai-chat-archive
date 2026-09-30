@@ -487,7 +487,10 @@ def api_analysis(conn, qs):
         st = analysis.status(adb)
         total = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
         st["total_conversations"] = total
-        st["pending"] = max(0, total - (st.get("analyzed") or 0))
+        exc = analysis.excluded_records(adb)
+        st["excluded"] = len(exc)
+        st["excluded_records"] = exc[:MAX_LIMIT]
+        st["pending"] = max(0, total - (st.get("analyzed") or 0) - len(exc))
         st["by_model"] = {r["model"] or "?": r["c"] for r in adb.execute(
             "SELECT model, COUNT(*) c FROM analysis GROUP BY model")}
         st["llm_analyzed"] = adb.execute(

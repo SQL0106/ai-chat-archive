@@ -65,7 +65,19 @@ CREATE TABLE IF NOT EXISTS analysis_errors (
     attempts        INTEGER DEFAULT 1,
     tried_at        TEXT
 );
+
+CREATE TABLE IF NOT EXISTS analysis_excluded (
+    conversation_id TEXT PRIMARY KEY,
+    source          TEXT,
+    title           TEXT,
+    model           TEXT,
+    reason          TEXT,
+    tagged_at       TEXT
+);
 """
+
+# 内容过滤（政治敏感等）被上游拒绝、标记为永不分析时使用的 model 哨兵值
+EXCLUDED_MODEL = "__excluded__"
 
 
 # --------------------------------------------------------------------------
@@ -148,6 +160,42 @@ def analyzed_ids(conn, prompt_version=None):
     else:
         rows = conn.execute("SELECT conversation_id FROM analysis").fetchall()
     return {r["conversation_id"] for r in rows}
+
+
+def mark_excluded(conn, cid, source="", title="", model="", reason=""):
+    """把某条对话标记为「内容过滤，永不分析」，从后续待分析列表里排除。"""
+    conn.execute(
+        "INSERT INTO analysis_excluded"
+        " (conversation_id, source, title, model, reason, tagged_at)"
+        " VALUES (?,?,?,?,?,?)"
+        " ON CONFLICT(conversation_id) DO UPDATE SET"
+        "   source=excluded.source, title=excluded.title, model=excluded.model,"
+        "   reason=excluded.reason, tagged_at=excluded.tagged_at",
+        (cid, source or "", title or "", model or "",
+         str(reason or "")[:1000], arclib.now_iso()))
+    conn.commit()
+
+
+def unmark_excluded(conn, cid):
+    conn.execute("DELETE FROM analysis_excluded WHERE conversation_id = ?", (cid,))
+    conn.commit()
+
+
+def excluded_ids(conn):
+    try:
+        return {r[0] for r in conn.execute(
+            "SELECT conversation_id FROM analysis_excluded")}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def excluded_records(conn):
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT conversation_id, source, title, model, reason, tagged_at"
+            " FROM analysis_excluded ORDER BY tagged_at DESC")]
+    except sqlite3.OperationalError:
+        return []
 
 
 def all_records(conn):

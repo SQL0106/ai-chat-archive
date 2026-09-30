@@ -148,8 +148,11 @@ def _select_pending(conn, rows, args):
                 " WHERE COALESCE(model, '') <> 'heuristic'")}
         else:
             done = analysis.analyzed_ids(aconn)
+        excluded = analysis.excluded_ids(aconn)
     finally:
         aconn.close()
+    # 内容过滤（政治敏感等）已标记排除的，任何模式下都不再分析
+    rows = [r for r in rows if r["conversation_id"] not in excluded]
     if getattr(args, "force", False):
         return rows
     return [r for r in rows if r["conversation_id"] not in done]
@@ -338,7 +341,11 @@ def cmd_run(a):
                                  error=_clip(str(e), 120))
                     _write_progress(prog, **state)
                     if fl:
-                        print("[%d/%d] %s内容过滤，跳过%s %s" % (
+                        analysis.mark_excluded(aconn, cid, source=r.get("source"),
+                                               title=r.get("title"),
+                                               model=cfg.get("model"),
+                                               reason=str(e))
+                        print("[%d/%d] %s内容过滤，标记排除%s %s" % (
                             i, total, YELLOW, RESET, _clip(str(e), 90)), flush=True)
                     else:
                         print("[%d/%d] %s失败%s %s" % (
@@ -549,6 +556,53 @@ def _filtered(e):
     return any(h in s for h in ("1301", "contentFilter", "不安全", "敏感内容"))
 
 
+def cmd_mark_excluded(a):
+    """把内容过滤（政治敏感等）失败的对话标记为排除，永不再分析。"""
+    conn, rows = _targets(a)
+    aconn = analysis.open_analysis_db(a.analysis_db)
+    try:
+        if a.clear:
+            ids = analysis.excluded_ids(aconn)
+            for cid in ids:
+                analysis.unmark_excluded(aconn, cid)
+            print("已清除 %d 条排除标记。" % len(ids))
+            return 0
+        byid = {r["conversation_id"]: r for r in rows}
+        if a.list:
+            recs = analysis.excluded_records(aconn)
+            if a.json:
+                print(json.dumps(recs, ensure_ascii=False, indent=2))
+                return 0
+            print("%s已排除（内容过滤）%s 共 %d 条" % (BOLD, RESET, len(recs)))
+            for r in recs:
+                print("  %s  %-8s %s" % (r["conversation_id"][:12],
+                                         r.get("source") or "-",
+                                         _clip(r.get("title"), 40)))
+            return 0
+        if a.ids:
+            items = [(cid.strip(), byid.get(cid.strip(), {}))
+                     for cid in a.ids.split(",") if cid.strip()]
+        else:
+            items = []
+            for e in aconn.execute(
+                    "SELECT conversation_id, error FROM analysis_errors"):
+                if _filtered(e["error"]):
+                    cid = e["conversation_id"]
+                    items.append((cid, byid.get(cid, {})))
+        n = 0
+        for cid, r in items:
+            analysis.mark_excluded(aconn, cid, source=r.get("source"),
+                                   title=r.get("title"), model=a.model,
+                                   reason=a.reason)
+            n += 1
+        total = len(analysis.excluded_ids(aconn))
+        print("%s已标记排除 %d 条%s（累计 %d 条）" % (BOLD, n, RESET, total))
+        return 0
+    finally:
+        conn.close()
+        aconn.close()
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="聊天记录的 LLM 分析工具")
     p.add_argument("--db", default=str(arclib.DEFAULT_DB), help="归档数据库")
@@ -612,6 +666,17 @@ def build_parser():
     ti.add_argument("--json", action="store_true")
     ti.add_argument("--dump", default="", help="把 id 列表写到这个目录")
     ti.set_defaults(func=cmd_tiers)
+
+    mx = sub.add_parser("mark-excluded",
+                        help="把内容过滤失败的对话标记为排除（不再分析）")
+    _add_filter_args(mx)
+    mx.add_argument("--ids", default="", help="手动指定对话 id（逗号分隔）")
+    mx.add_argument("--list", action="store_true", help="只列出已排除的")
+    mx.add_argument("--clear", action="store_true", help="清除所有排除标记")
+    mx.add_argument("--json", action="store_true")
+    mx.add_argument("--model", default="", help="标记时记录的模型名")
+    mx.add_argument("--reason", default="内容过滤（上游拒绝）", help="排除原因")
+    mx.set_defaults(func=cmd_mark_excluded)
     return p
 
 
