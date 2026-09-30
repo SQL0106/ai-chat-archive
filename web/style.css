@@ -157,7 +157,7 @@ main { flex: 1 1 auto; min-height: 0; position: relative; }
 .panel:not(#tab-browse) { overflow-y: auto; }
 #tab-browse.active { display: flex; overflow: hidden; }
 
-.page { padding: 18px; max-width: 1400px; margin: 0 auto; }
+.page { padding: 18px; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .stat {
