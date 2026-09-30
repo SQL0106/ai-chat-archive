@@ -1719,6 +1719,18 @@ function relayout() {
   act.style.display = prev;
 }
 
+// 用 JS 精确设定 app 高度：移动端地址栏/工具栏收起或展开时 100dvh 首屏常未定型，
+// 会导致内层滚动容器高度错误、首屏滑不动。改为按 visualViewport 实测高度写死并重排。
+function syncViewport() {
+  const vv = window.visualViewport;
+  const h = Math.round((vv && vv.height) || window.innerHeight || 0);
+  if (h > 0) {
+    document.documentElement.style.height = h + 'px';
+    document.body.style.height = h + 'px';
+  }
+  relayout();
+}
+
 let _issueAt = 0;
 function reportIssue(kind, detail) {
   try { console.error('[app:' + kind + ']', detail); } catch (_) {}
@@ -1772,6 +1784,7 @@ function init() {
   $('#tlAll').onclick = () => { $('#tlFrom').value = ''; $('#tlTo').value = ''; applyTimeline(); };
   $('#tlBucket').onchange = applyTimeline;
   window.addEventListener('resize', debounce(() => {
+    syncViewport();
     if (tl.loaded && $('#tab-timeline').classList.contains('active')) applyTimeline();
     if (ana.loaded && $('#tab-analysis').classList.contains('active')) loadEmotion().catch(() => {});
   }, 250));
@@ -1863,11 +1876,15 @@ function init() {
   routeFromHash();
 
   // 首屏布局刷新：移动端地址栏/工具栏高度定型后重排，修复首屏滑不动
-  const relayoutSoon = () => requestAnimationFrame(() => requestAnimationFrame(relayout));
-  relayoutSoon();
-  window.addEventListener('load', relayoutSoon);
-  window.addEventListener('pageshow', relayoutSoon);
-  window.addEventListener('orientationchange', () => setTimeout(relayout, 300));
+  const syncSoon = () => { syncViewport(); requestAnimationFrame(() => requestAnimationFrame(syncViewport)); };
+  syncSoon();
+  window.addEventListener('load', syncViewport);
+  window.addEventListener('pageshow', syncViewport);
+  window.addEventListener('orientationchange', () => setTimeout(syncViewport, 300));
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', debounce(syncViewport, 150));
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(syncViewport).catch(() => {});
+  setTimeout(syncViewport, 350);
+  setTimeout(syncViewport, 900);
 }
 
 document.addEventListener('DOMContentLoaded', init);
