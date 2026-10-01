@@ -400,3 +400,7 @@ ORDER BY timestamp;
 - `messages_fts` 的 `unicode61` 分词器对中文基本无效（一个词命中率只有 3%–9%），
   所以中文检索走 `LIKE` 全表扫描（约 0.3 秒），代价是没有 BM25 排序、只能按词频+标题加权。
   换成 `trigram` 分词器要重建几百 MB 索引，这台机器空间和供电都不划算，暂时不动。
+
+## 待办 / 可继续的方向
+
+- [ ] **优化网页**（性能）：参照 qzone-webui 的做法（commit b719fb8）。用户反馈模式：页面打开「卡一下」才显示、Tailscale 远程访问时无响应无法滑动。排查步骤：chrome-devtools 看 DOM 节点数与 longtask（>50ms 任务）；后端接口先测耗时排除服务端。主嫌通常是前端一次性生成上千个 DOM cell（如时间线 SVG 点/浏览长列表），可改 canvas 单元素绘制 + dpr 缩放，或虚拟滚动/懒加载。改完验证 0 console error（前端 no-cache，刷新即可生效）。
