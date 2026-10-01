@@ -31,6 +31,7 @@
 """
 
 import argparse
+import gzip
 import json
 import mimetypes
 import os
@@ -1236,12 +1237,22 @@ class Handler(BaseHTTPRequestHandler):
         if ctype.startswith("text/") or ctype in ("application/javascript",):
             ctype += "; charset=utf-8"
         body = target.read_bytes()
+        gzippable = ctype.startswith("text/") or ctype in ("application/javascript",)
+        accept = self.headers.get("Accept-Encoding", "")
+        encoded = None
+        if gzippable and len(body) > 1024 and "gzip" in accept:
+            encoded = gzip.compress(body, 6)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        if encoded is not None:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+            self.send_header("Content-Length", str(len(encoded)))
+        else:
+            self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(encoded if encoded is not None else body)
 
 
 class Server(ThreadingHTTPServer):

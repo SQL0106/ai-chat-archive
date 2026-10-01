@@ -15,6 +15,27 @@ try {
 } catch (e) {}
 </script>
 <link rel="stylesheet" href="/style.css">
+<script>
+/* 折叠区初始态：HTML 默认展开，这里在首帧前把用户上次关掉的折叠区隐藏，
+   否则 setupFolds 迟到执行会造成明显布局位移（CLS）。JS 跑起来后会移除本样式。 */
+(function () {
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem('statsFolds') || '{}'); } catch (e) {}
+  var css = '';
+  Object.keys(saved).forEach(function (k) {
+    if (saved[k] === false) {
+      css += '.fold.open[data-fold="' + k + '"] .fold-b{display:none}'
+           + '.fold.open[data-fold="' + k + '"] .fold-i{transform:rotate(-90deg)}';
+    }
+  });
+  if (css) {
+    var s = document.createElement('style');
+    s.id = 'foldInit';
+    s.textContent = css;
+    document.head.appendChild(s);
+  }
+})();
+</script>
 </head>
 <body>
 
@@ -49,9 +70,21 @@ try {
   <!-- ============ 统计 ============ -->
   <section id="tab-stats" class="panel active">
     <div class="page">
-      <div id="statCards" class="cards"></div>
+      <div id="statCards" class="cards">
+        <!-- 骨架卡：与 loadStats() 的卡片同构，数据到达前占住高度，避免整页下移（CLS） -->
+        <div class="stat"><div class="v">—</div><div class="k">对话总数（个）</div></div>
+        <div class="stat"><div class="v">—</div><div class="k">消息总数（条）</div></div>
+        <div class="stat"><div class="v">—</div><div class="k">我发出的（条）</div></div>
+        <div class="stat"><div class="v">—</div><div class="k">AI 回复的（条）</div></div>
+        <div class="stat"><div class="v">—</div><div class="k">正文总量</div></div>
+        <div class="stat"><div class="v">—</div><div class="k">思维链</div></div>
+        <div class="stat"><div class="v">—</div><div class="k">活跃天数（天）</div></div>
+        <div class="stat"><div class="v">—</div><div class="k">跨度（天）</div></div>
+        <div class="stat"><div class="v small">—</div><div class="v small">—</div><div class="k">时间范围</div></div>
+        <div class="stat"><div class="v">—</div><div class="k">最忙一天（条）</div></div>
+      </div>
 
-      <div class="fold" data-fold="time">
+      <div class="fold open" data-fold="time">
         <button class="fold-h" type="button"><span class="fold-i">▾</span><span>时间分布</span><span class="fold-x" id="foldX-time"></span></button>
         <div class="fold-b">
           <div class="grid2">
@@ -70,10 +103,19 @@ try {
         </div>
       </div>
 
-      <div class="fold" data-fold="active">
+      <div class="fold open" data-fold="active">
         <button class="fold-h" type="button"><span class="fold-i">▾</span><span>活跃度</span><span class="fold-x" id="foldX-active"></span></button>
         <div class="fold-b">
-          <div id="activeCards" class="cards"></div>
+          <div id="activeCards" class="cards">
+            <div class="stat"><div class="v">—</div><div class="k">日均消息（条）</div></div>
+            <div class="stat"><div class="v">—</div><div class="k">活跃日均（条）</div></div>
+            <div class="stat"><div class="v">—</div><div class="k">平均每对话（条）</div></div>
+            <div class="stat"><div class="v">—</div><div class="k">平均每条（字）</div></div>
+            <div class="stat"><div class="v">—</div><div class="k">我平均（字）</div></div>
+            <div class="stat"><div class="v">—</div><div class="k">AI 平均（字）</div></div>
+            <div class="stat"><div class="v">—</div><div class="k">活跃日对话（个）</div></div>
+            <div class="stat"><div class="v">—</div><div class="k">活跃率（%）</div></div>
+          </div>
           <div class="grid2">
             <div class="card"><h3>连续活跃</h3><div id="streakBox" class="kv"></div></div>
             <div class="card"><h3>最忙记录</h3><div id="busyBox" class="kv"></div></div>
@@ -81,7 +123,7 @@ try {
         </div>
       </div>
 
-      <div class="fold" data-fold="content">
+      <div class="fold open" data-fold="content">
         <button class="fold-h" type="button"><span class="fold-i">▾</span><span>内容构成</span><span class="fold-x" id="foldX-content"></span></button>
         <div class="fold-b">
           <div class="grid2">
@@ -95,7 +137,7 @@ try {
         </div>
       </div>
 
-      <div class="fold" data-fold="length">
+      <div class="fold open" data-fold="length">
         <button class="fold-h" type="button"><span class="fold-i">▾</span><span>长度分布</span><span class="fold-x" id="foldX-length"></span></button>
         <div class="fold-b">
           <div class="grid2">
@@ -105,7 +147,7 @@ try {
         </div>
       </div>
 
-      <div class="fold" data-fold="source">
+      <div class="fold open" data-fold="source">
         <button class="fold-h" type="button"><span class="fold-i">▾</span><span>来源</span><span class="fold-x" id="foldX-source"></span></button>
         <div class="fold-b">
           <div class="grid2">
@@ -115,7 +157,7 @@ try {
         </div>
       </div>
 
-      <div class="fold" data-fold="tables">
+      <div class="fold open" data-fold="tables">
         <button class="fold-h" type="button"><span class="fold-i">▾</span><span>榜单</span><span class="fold-x" id="foldX-tables"></span></button>
         <div class="fold-b">
           <div class="grid2">

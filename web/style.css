@@ -577,3 +577,15 @@ mark.current { background: var(--accent); color: var(--on-accent); }
   .tier-cols { grid-template-columns: minmax(0, 1fr); }
   .inline.grow { flex-basis: 100%; }
 }
+
+/* ---------- 统计页占位高度 ----------
+   数值 = 实测渲染完成后的高度；数据到达前先占住，避免整页下移（CLS 0.45 → 目标 <0.1） */
+#heatmap { min-height: 113px; }
+#streakBox { min-height: 76px; }
+#busyBox { min-height: 104px; }
+#chartYear { min-height: 61px; }
+#chartModel { min-height: 255px; }
+#chartRoleChars { min-height: 61px; }
+#chartSource { min-height: 94px; }
+#chartTsSrc { min-height: 29px; }
+#longestMsg { min-height: 144px; }

@@ -403,4 +403,12 @@ ORDER BY timestamp;
 
 ## 待办 / 可继续的方向
 
-- [ ] **优化网页**（性能）：参照 qzone-webui 的做法（commit b719fb8）。用户反馈模式：页面打开「卡一下」才显示、Tailscale 远程访问时无响应无法滑动。排查步骤：chrome-devtools 看 DOM 节点数与 longtask（>50ms 任务）；后端接口先测耗时排除服务端。主嫌通常是前端一次性生成上千个 DOM cell（如时间线 SVG 点/浏览长列表），可改 canvas 单元素绘制 + dpr 缩放，或虚拟滚动/懒加载。改完验证 0 console error（前端 no-cache，刷新即可生效）。
+- [x] **优化网页**（性能）· 2026-10-01 完成，实测（chrome-devtools）：
+  - 时间线由「每点 2 个 SVG rect」改为 **canvas 单元素绘制 + dpr 缩放**（悬停用坐标反算，不建命中区，换主题自动重画）：
+    时间线面板 DOM **1228 → 17**，全页打开时间线时 **2412 → 1202**，按天粒度 2600+ 点同样只有 1 个 canvas。
+  - 统计页异步渲染的整页下移：概览/活跃度改为 **HTML 骨架卡**，热力图、键值框、hchart、最长消息预留实测高度（`min-height`）：
+    **CLS 0.4532 → 0.01**（Good），LCP 433ms → 244ms。
+  - 折叠区初始态改由 `<head>` 内联脚本在首帧前按 `localStorage` 设好（避免 `setupFolds` 迟到开合造成位移）。
+  - 静态文件 **gzip**（`Accept-Encoding` 协商，app.js 74KB → 22KB，style.css/HTML 同样压缩）；服务改后需 `sudo systemctl restart ai-archive-web`。
+  - 长任务：首屏无 >50ms longtask；浏览列表本就是滚动触底按 50 条懒加载，未再做虚拟滚动。
+  - 验证：0 console error（仅浏览器自带 verbose 提示）。

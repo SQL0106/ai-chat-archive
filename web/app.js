@@ -202,7 +202,8 @@ function renderHBars(box, items, opt) {
   });
 }
 
-/* 时间序列：SVG 柱状图，带 Y 轴刻度、按月 X 轴标签、悬浮提示、点击下钻 */
+/* 时间序列：canvas 柱状图（整图 1 个 DOM 元素 + dpr 缩放），
+   带 Y 轴刻度、按月 X 轴标签、悬浮提示（坐标反算，不建命中区）、点击下钻 */
 function niceScale(v) {
   if (!(v > 0)) v = 1;
   const raw = v / 4;
@@ -222,8 +223,7 @@ function renderTimeSeries(box, items, opt) {
   if (!items.length) { box.appendChild(el('div', 'empty', '暂无数据')); return; }
 
   // 移动端切标签页时容器可能还没完成布局（clientWidth 为 0），
-  // 那样算出来的 viewBox 会远大于实际显示宽度，整个 SVG 被等比缩小，
-  // X 轴标签就糊成一团认不出来。所以先量宽度，量不到就等下一帧重来。
+  // 那样算出来的宽度会不对，所以先量宽度，量不到就等下一帧重来。
   const cw = box.clientWidth;
   if (cw < 200) {
     const tries = (opt._tries || 0) + 1;
@@ -232,7 +232,6 @@ function renderTimeSeries(box, items, opt) {
       return;
     }
   }
-  // viewBox 宽度 = 实际显示宽度 → 缩放比 1:1，字号就是 CSS 里的字号，不会被缩小。
   const W = cw >= 200 ? cw : 360;
   const narrow = W < 460;
   const H = 230, padL = narrow ? 32 : 48, padR = narrow ? 8 : 16, padT = 16, padB = 42;
@@ -245,69 +244,107 @@ function renderTimeSeries(box, items, opt) {
   const yOf = (v) => padT + ih - (v / max) * ih;
   const xOf = (i) => padL + step * (i + 0.5);
 
-  const NS = 'http://www.w3.org/2000/svg';
-  const mk = (t, a) => {
-    const e = document.createElementNS(NS, t);
-    for (const k in a) e.setAttribute(k, a[k]);
-    return e;
-  };
-  const svg = mk('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'tsvg' });
-
-  sc.ticks.forEach((v, t) => {
-    const y = yOf(v);
-    svg.appendChild(mk('line', { x1: padL, x2: W - padR, y1: y, y2: y, class: t ? 'grid' : 'axis' }));
-    const lab = mk('text', { x: padL - 8, y: y + 3.5, class: 'ylab' });
-    lab.textContent = fmtAxis(v);
-    svg.appendChild(lab);
-  });
-
-  const bars = [];
-  let lastLabX = -Infinity;
-  items.forEach((it, i) => {
-    const h = Math.max(it.n > 0 ? 1.5 : 0, (it.n / max) * ih);
-    const r = mk('rect', {
-      x: xOf(i) - bw / 2, y: padT + ih - h, width: bw, height: h,
-      rx: bw > 5 ? 2 : 0, class: 'col',
-    });
-    bars.push(r);
-    svg.appendChild(r);
-    if (opt.xlabel) {
-      const lb = opt.xlabel(it, i, items);
-      const x = xOf(i);
-      const gap = Math.max(opt.minGap || 24, lb ? lb.length * (narrow ? 7 : 6) + 10 : 0);
-      if (lb && x - lastLabX >= gap) {
-        const txt = mk('text', { x, y: padT + ih + 16, class: 'xlab' });
-        txt.textContent = lb;
-        svg.appendChild(txt);
-        lastLabX = x;
-      }
-    }
-  });
-
+  const cv = el('canvas', 'tsvg tscv');
+  box.appendChild(cv);
   const tip = el('div', 'ts-tip');
   box.appendChild(tip);
+  const ctx = cv.getContext('2d');
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const fsize = window.innerWidth <= 820 ? 11 : 10;
+  let hover = -1;
+
+  const cssVar = (name) => {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    return v ? v.trim() : '';
+  };
+
+  function draw() {
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    cv.style.width = W + 'px';
+    cv.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const cGrid = cssVar('--line'), cAxis = cssVar('--line2'), cMuted = cssVar('--muted');
+    const cCol = cssVar('--accent'), cHit = cssVar('--accent2');
+    const fam = getComputedStyle(box).fontFamily || 'sans-serif';
+    ctx.font = fsize + 'px ' + fam;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'alphabetic';
+
+    sc.ticks.forEach((v, t) => {
+      const y = yOf(v);
+      ctx.strokeStyle = t ? cGrid : cAxis;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padL, Math.round(y) + 0.5);
+      ctx.lineTo(W - padR, Math.round(y) + 0.5);
+      ctx.stroke();
+      ctx.fillStyle = cMuted;
+      ctx.fillText(fmtAxis(v), padL - 8, y + 3.5);
+    });
+
+    items.forEach((it, i) => {
+      const h = Math.max(it.n > 0 ? 1.5 : 0, (it.n / max) * ih);
+      const x = xOf(i) - bw / 2, y = padT + ih - h;
+      ctx.fillStyle = i === hover ? cHit : cCol;
+      ctx.globalAlpha = i === hover ? 1 : 0.8;
+      if (bw > 5 && ctx.roundRect) {
+        ctx.beginPath();
+        ctx.roundRect(x, y, bw, h, 2);
+        ctx.fill();
+      } else {
+        ctx.fillRect(x, y, bw, h);
+      }
+      ctx.globalAlpha = 1;
+    });
+
+    if (opt.xlabel) {
+      ctx.fillStyle = cMuted;
+      ctx.textAlign = 'center';
+      let lastLabX = -Infinity;
+      items.forEach((it, i) => {
+        const lb = opt.xlabel(it, i, items);
+        const x = xOf(i);
+        const gap = Math.max(opt.minGap || 24, lb ? lb.length * (narrow ? 7 : 6) + 10 : 0);
+        if (lb && x - lastLabX >= gap) {
+          ctx.fillText(lb, x, padT + ih + 16);
+          lastLabX = x;
+        }
+      });
+    }
+  }
+
   const show = (i) => {
+    if (i < 0 || i >= n) return;
     const it = items[i];
     tip.textContent = opt.tip ? opt.tip(it) : it.k + ' · ' + fmtNum(it.n);
     tip.style.left = (xOf(i) / W) * 100 + '%';
     tip.style.top = (yOf(it.n) / H) * 100 + '%';
     tip.style.display = 'block';
-    bars.forEach((b, j) => b.classList.toggle('hit', j === i));
+    if (hover !== i) { hover = i; draw(); }
   };
-  const hide = () => { tip.style.display = 'none'; bars.forEach((b) => b.classList.remove('hit')); };
-
-  items.forEach((it, i) => {
-    const hit = mk('rect', { x: padL + step * i, y: padT, width: step, height: ih, class: 'hitrect' });
-    hit.addEventListener('mouseenter', () => show(i));
-    hit.addEventListener('mouseleave', hide);
-    if (opt.onClick) {
-      hit.style.cursor = 'pointer';
-      hit.addEventListener('click', () => opt.onClick(it));
-    }
-    svg.appendChild(hit);
+  const hide = () => {
+    tip.style.display = 'none';
+    if (hover !== -1) { hover = -1; draw(); }
+  };
+  const idxAt = (clientX) => {
+    const r = cv.getBoundingClientRect();
+    const i = Math.floor((clientX - r.left - padL) / step);
+    return i >= 0 && i < n ? i : -1;
+  };
+  cv.addEventListener('mousemove', (e) => {
+    const i = idxAt(e.clientX);
+    if (i < 0) hide(); else show(i);
   });
-
-  box.appendChild(svg);
+  cv.addEventListener('mouseleave', hide);
+  cv.addEventListener('click', (e) => {
+    const i = idxAt(e.clientX);
+    if (i >= 0 && opt.onClick) opt.onClick(items[i]);
+  });
+  if (opt.onClick) cv.style.cursor = 'pointer';
+  cv.__redraw = draw;
+  draw();
 }
 
 /* ---------------- 统计 ---------------- */
@@ -329,6 +366,9 @@ function setupFolds() {
       try { localStorage.setItem('statsFolds', JSON.stringify(saved)); } catch (e) { /* 隐私模式忽略 */ }
     };
   });
+  // 首帧前隐藏用的临时样式已无用（状态已由 class 承载），移除避免后续点击失效
+  const fi = document.getElementById('foldInit');
+  if (fi) fi.remove();
 }
 
 function setFold(name, text) {
@@ -1659,6 +1699,8 @@ function applyTheme() {
   const btn = $('#themeBtn');
   if (btn) btn.title = '外观：' + THEME_LABELS[mode] +
     (mode === 'auto' ? '（跟随系统）' : '') + ' · 点击切换 自动 → 浅色 → 深色';
+  // canvas 图表的颜色是绘制时取的 CSS 变量，换主题要重画
+  $$('canvas.tscv').forEach((c) => { if (c.__redraw) c.__redraw(); });
 }
 
 function initTheme() {
