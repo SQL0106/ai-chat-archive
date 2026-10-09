@@ -90,6 +90,9 @@ def _targets(args):
                 params.append(arclib.parse_date(args.to_date))
             sql.append(" ORDER BY created_at")
             rows = [dict(r) for r in conn.execute(" ".join(sql), params).fetchall()]
+        if getattr(args, "ids", ""):
+            want = {s.strip() for s in args.ids.split(",") if s.strip()}
+            rows = [r for r in rows if r["conversation_id"] in want]
         if args.min_msgs:
             rows = [r for r in rows if (r.get("message_count") or 0) >= args.min_msgs]
         return conn, rows
@@ -670,7 +673,6 @@ def build_parser():
     mx = sub.add_parser("mark-excluded",
                         help="把内容过滤失败的对话标记为排除（不再分析）")
     _add_filter_args(mx)
-    mx.add_argument("--ids", default="", help="手动指定对话 id（逗号分隔）")
     mx.add_argument("--list", action="store_true", help="只列出已排除的")
     mx.add_argument("--clear", action="store_true", help="清除所有排除标记")
     mx.add_argument("--json", action="store_true")
@@ -681,6 +683,8 @@ def build_parser():
 
 
 def _add_filter_args(sp):
+    sp.add_argument("--ids", default="",
+                    help="手动指定对话 id（逗号分隔），只分析这些对话")
     sp.add_argument("--collection", default="", help="只分析某个选集")
     sp.add_argument("--source", default="", help="只分析某个来源")
     sp.add_argument("--from", dest="from_date", default="")

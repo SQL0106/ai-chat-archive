@@ -638,6 +638,113 @@ def is_activity_html(name):
     return base.endswith(".html") and ("activity" in base or "活动" in base)
 
 
+ACTIVITY_JSON_NAMES = ("我的活动记录.json", "my activity.json")
+
+
+def is_activity_json(name):
+    """Gemini Apps 活动 JSON；排除 AI Mode 的同名文件（路径含 ai mode）。"""
+    low = str(name).lower()
+    if "ai mode" in low:
+        return False
+    return low.rsplit("/", 1)[-1] in ACTIVITY_JSON_NAMES
+
+
+def parse_gemini_activity_json(path):
+    """解析 Google Takeout 的 Gemini Apps '我的活动记录.json'。
+
+    每条记录一轮问答：
+      title="Prompted <提问>"，time=ISO8601(Z)，cid 在 details[].url，
+      回答在 safeHtmlItem[].html。产出与 HTML 版同构的 convs。
+    """
+    print("[*] 解析 Gemini 活动记录 JSON: %s" % Path(path).name)
+    with open(path, "r", encoding="utf-8-sig") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        for key in ("items", "activity", "data"):
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+    if not isinstance(data, list):
+        raise SystemExit("错误: Gemini 活动 JSON 格式无法识别: %s" % path)
+    convs, order = {}, []
+    for it in data:
+        if not isinstance(it, dict):
+            continue
+        header = str(it.get("header") or "")
+        if header and "gemini" not in header.lower():
+            continue
+        title = str(it.get("title") or "").strip()
+        if not title:
+            continue
+        am = re.match(r"(Prompted|Branched)[\s\xa0]+", title)
+        if not am:
+            continue
+        action = am.group(1)
+        prompt = title[am.end():].strip()
+        ts = to_iso(it.get("time") or it.get("timestamp"))
+        cid = None
+        urls = []
+        for d in (it.get("details") or []):
+            if isinstance(d, dict):
+                urls += [d.get("url"), d.get("name")]
+        urls.append(it.get("titleUrl"))
+        for u in urls:
+            if isinstance(u, str) and "gemini.google.com/app/" in u:
+                lm = re.search(r"gemini\.google\.com/app/([0-9a-fA-F]{8,})", u)
+                if lm:
+                    cid = lm.group(1)
+                    break
+        if not cid:
+            cid = "gemini-unknown"
+        resp_html = "".join(
+            str(x.get("html") or "") for x in (it.get("safeHtmlItem") or [])
+            if isinstance(x, dict))
+        resp = html_to_text(resp_html)
+        if not (prompt or resp):
+            continue
+        if cid not in convs:
+            convs[cid] = {"source": "gemini", "conversation_id": cid,
+                          "title": "(无标题)", "created_at": None,
+                          "updated_at": None, "messages": []}
+            order.append(cid)
+        convs[cid]["messages"].append({
+            "ts": ts, "prompt": prompt, "resp": resp,
+            "atts": extract_html_attachments(resp_html), "action": action,
+        })
+
+    conversations = []
+    for cid in order:
+        conv = convs[cid]
+        events = sorted(conv["messages"], key=lambda x: (x["ts"] or "", x["action"]))
+        rows = []
+        for e in events:
+            src = "native" if e["ts"] else "none"
+            if e["prompt"]:
+                rows.append({"role": "user", "text": e["prompt"], "thinking": "",
+                             "model": None, "attachments": [], "timestamp": e["ts"],
+                             "timestamp_source": src})
+            if e["resp"]:
+                rows.append({"role": "assistant", "text": e["resp"], "thinking": "",
+                             "model": None, "attachments": e["atts"],
+                             "timestamp": e["ts"], "timestamp_source": src})
+        if not rows:
+            continue
+        for i, r in enumerate(rows):
+            r["message_index"] = i
+        for r in rows:
+            if r["role"] == "user" and r["text"]:
+                conv["title"] = r["text"].strip().splitlines()[0][:80]
+                break
+        ts_list = [r["timestamp"] for r in rows if r["timestamp"]]
+        conv["created_at"] = ts_list[0] if ts_list else None
+        conv["updated_at"] = ts_list[-1] if ts_list else None
+        conv["messages"] = rows
+        if not any(r["role"] == "assistant" for r in rows):
+            conv["_prompt_only"] = True
+        conversations.append(conv)
+    return conversations
+
+
 def extract_members_to_temp(path, predicate):
     """把压缩包内匹配的成员流式解压到临时文件, 逐个 yield (name, tmp_path)。"""
     path = Path(path)
@@ -690,15 +797,22 @@ def extract_members_to_temp(path, predicate):
 
 def parse_gemini_activity_file(path, tz_offset=8.0):
     path = Path(path)
+    if path.suffix.lower() == ".json":
+        return parse_gemini_activity_json(path)
     if path.suffix.lower() == ".html":
         print("[*] 解析 Gemini 活动记录 HTML: %s" % path.name)
         return parse_gemini_activity_items(iter_activity_items(path), tz_offset)
     conversations = []
-    for name, tmp in extract_members_to_temp(path, is_activity_html):
-        print("[*] 解析 Gemini 活动记录 HTML: %s" % name)
+    for name, tmp in extract_members_to_temp(
+            path, lambda n: is_activity_html(n) or is_activity_json(n)):
         try:
-            conversations.extend(
-                parse_gemini_activity_items(iter_activity_items(tmp), tz_offset))
+            if is_activity_json(name):
+                print("[*] 解析 Gemini 活动记录 JSON: %s" % name)
+                conversations.extend(parse_gemini_activity_json(tmp))
+            else:
+                print("[*] 解析 Gemini 活动记录 HTML: %s" % name)
+                conversations.extend(
+                    parse_gemini_activity_items(iter_activity_items(tmp), tz_offset))
         finally:
             try:
                 os.remove(tmp)
@@ -923,9 +1037,12 @@ def write_markdown(conversations, base, tz, throttle=0.0):
 
 
 def write_sqlite(conversations, records, path, throttle=0.0):
-    if path.exists():
-        path.unlink()
-    conn = sqlite3.connect(str(path))
+    # 原子写：先写 .tmp 再 os.replace，避免中途断电/复位把正式库清成半截
+    tmp = Path(str(path) + ".tmp")
+    for stale in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm")):
+        if stale.exists():
+            stale.unlink()
+    conn = sqlite3.connect(str(tmp))
     cur = conn.cursor()
     cur.executescript("""
         PRAGMA journal_mode=WAL;
@@ -973,6 +1090,7 @@ def write_sqlite(conversations, records, path, throttle=0.0):
         if throttle:
             time.sleep(throttle)
     conn.close()
+    os.replace(tmp, path)
 
 
 def archive_member_names(path):
@@ -1045,12 +1163,17 @@ def discover(raw):
                 (deepseek if kind == "deepseek" else chatgpt).append(p)
             elif any(is_activity_html(n) for n in names):
                 activity.append(p)
+            elif any(is_activity_json(n) for n in names):
+                activity.append(p)
             elif any(n.lower().endswith("myactivity.json") for n in names):
                 takeout.append(p)
             elif any(n.lower().endswith(".ndjson") for n in names):
                 gemini.append(p)
             continue
         if suf == ".html" and is_activity_html(p.name):
+            activity.append(p)
+            continue
+        if suf == ".json" and is_activity_json(str(p)):
             activity.append(p)
             continue
         if low.endswith(".ndjson") or (suf == ".json" and "gemini" in low):
