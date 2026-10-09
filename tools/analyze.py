@@ -111,15 +111,14 @@ TOPIC_PRESETS = {
 
 
 def _topic_rows(conn, aconn, rows, topic):
-    """按主题筛：标题+首条用户消息命中关键词，或启发式分类为「情绪」。"""
+    """按主题筛：标题+全部消息全文命中关键词，或启发式分类为「情绪」。"""
     pattern = TOPIC_PRESETS.get(topic, topic)
     pat = re.compile(pattern, re.I)
-    first = {}
-    for cid, text in conn.execute(
-            "SELECT conversation_id, text FROM messages WHERE role = 'user'"
-            " ORDER BY conversation_id, message_index"):
-        if cid not in first:
-            first[cid] = text or ""
+    want = {r["conversation_id"] for r in rows}
+    buckets = {}
+    for cid, text in conn.execute("SELECT conversation_id, text FROM messages"):
+        if cid in want and text:
+            buckets.setdefault(cid, []).append(text)
     try:
         emo = {r[0] for r in aconn.execute(
             "SELECT conversation_id FROM analysis WHERE kind = '情绪'")}
@@ -128,7 +127,8 @@ def _topic_rows(conn, aconn, rows, topic):
     keep, hit_kw, hit_emo = [], 0, 0
     for r in rows:
         cid = r["conversation_id"]
-        kw = bool(pat.search((r.get("title") or "") + "\n" + first.get(cid, "")[:800]))
+        hay = (r.get("title") or "") + "\n" + "\n".join(buckets.get(cid, ()))
+        kw = bool(pat.search(hay))
         eh = cid in emo
         if kw or eh:
             keep.append(r)

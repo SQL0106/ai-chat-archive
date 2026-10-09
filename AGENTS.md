@@ -1,46 +1,62 @@
 # AGENTS.md — ai-chat-archive 项目知识库
 
 > 本文件是给 AI/开发者的接手文档：**先读这里，再动手**。README.md 讲"是什么/怎么用"，这里讲"代码在哪、机制是什么、坑在哪、正在做什么"。
-> 新发现的结构/行号/机制必须及时补写进来，禁止反复重新探索。
+> 新发现的结构/行号/机制必须及时补写进来，禁止反复重新探索。（行号基于 2026-10-10 实测，改动后要更新。）
 
 ## 项目速览
 
-- 路径 `~/ai-chat-archive`（git 仓库，远程 https + gh 认证，自动提交推送：中文提交信息，改完验证直接 push 不问）。
-- 流程：`raw/`（原始导出）→ `scripts/archive_ai_chats.py` 解析 → `out/`（normalized.jsonl、md/、archive.sqlite）→ `tools/analyze.py` 分析 → `work/analysis.sqlite`。
-- 网页：`scripts/serve_archive.py` + `web/`（原生 JS：index.html / app.js / style.css），systemd 单元 `ai-archive-web.service`（限负载）。
-- **只用 Python3 标准库**；**重要文件禁写 /tmp**（写仓库内路径）。
-- **机器供电弱、负载高会复位**：重活必须
-  `systemd-run --user --scope -p CPUQuota=40% --collect nice -n 19 <cmd>`。
+- 路径 `~/ai-chat-archive`（git 仓库，远程 https://github.com/SQL0106/ai-chat-archive.git，gh 认证；自动提交推送：中文提交信息，改完验证直接 push 不问）。
+- 流程：`raw/`（原始导出）→ `scripts/archive_ai_chats.py` 或 `scripts/incremental.py` 解析 → `out/`（normalized.jsonl、md/、archive.sqlite）→ `tools/analyze.py` 分析 → `work/analysis.sqlite`。
+- 网页：`scripts/serve_archive.py`（:8765 常驻，端口 `--port`）+ `web/`（原生 JS），systemd 单元 `ai-archive-web.service`。
+- **只用 Python3 标准库**；**重要文件禁写 /tmp**（勘察产物放仓库 `.agent/`，临时文件脚本已重定向到 `work/tmp`）。
+- **oneplus8（本机）供电弱、负载高会硬件复位**（断电曾把源码/库写坏）：重活一律放 **fedora** 跑（见「fedora 工作流」）；本机必须跑时用
+  `systemd-run --user --collect --unit=<名> -p CPUQuota=10% nice -n 19 python3 <绝对路径>`（scope 模式不吃 `-p Nice=19`，用 `nice -n 19`）。**编辑完立即 commit**（断电会吃掉未提交编辑，曾发生 .git 对象损坏）。
 - 时间线约定：旧导出退役 = 改名加 `.old` 后缀（discover 跳过非白名单扩展名）。
 
 ## raw/ 输入与导入惯例
 
-- DeepSeek 官方导出 `deepseek_data-*.zip` 是**全量快照**（cumulative）：新导出包含旧导出全部内容，导入新版前把旧 zip 改 `.old` 退役，避免重复。
-- ChatGPT zip：`f0dd…-2026-09-15-….zip`。
-- Gemini：`raw/Takeout/我的活动/Gemini Apps/我的活动记录.html`（134MB Takeout，首选、native 时间）；备选 `myactivity.json`（仅提问时间）+ `gemini_chats.ndjson`（全文无时间）合并（README 有细节）。
-- 当前状态（2026-10-09）：`deepseek_data-2026-10-08.zip` **新增待导入**；`10-01.zip` 待退役改 `.old`；`09-17.zip.old` 已退役。
-- 上次导入（10-01，work/import.log）：chatgpt 94 对话/4090 消息，deepseek 1558/10380，gemini 3937/58963。
-- out/manifest.json **陈旧**（generated_at 2026-09-17，inputs 只记到 09-17），与 10-01 实际重建不一致 → 增量方案要以 sha256 manifest 为准做引导。
+- DeepSeek 官方导出 `deepseek_data-*.zip` 是**全量快照**（cumulative）：新版含旧版全部内容，导入新版前把旧 zip 改 `.old`。
+- 当前 raw/：`deepseek_data-2026-09-17.zip.old`、`deepseek_data-2026-10-01.zip.old`、`deepseek_data-2026-10-08.zip`（最新）、ChatGPT `f0dd…-2026-09-15-….zip`、`Takeout/`（旧 140MB 活动 HTML）、`takeout-20261008T155525Z-1-001.tgz.old`（424MB 新 Takeout，已改 .old；其 147MB Gemini 活动 JSON 已抽出为独立文件参与导入）。
+- **Gemini 活动两种格式**（信息等同，都解析）：旧 = Takeout HTML `我的活动记录.html`（140MB）；新 = Takeout JSON `我的活动记录.json`（147MB，条目 `{header:"Gemini Apps", title:"Prompted <提问>", time:ISO, details[].url 含 gemini.google.com/app/<hex cid>, safeHtmlItem[].html 回答}`）。**AI Mode 同名 JSON 必须排除**（`is_activity_json` 靠路径含 "ai mode" 过滤）。
+- Gemini 备选：`myactivity.json`（仅提问时间回填）+ `gemini_chats.ndjson`（油猴导出，全文无时间）——与 HTML/JSON 共存互备。
+- 上次导入日志（work/import.log）：三输入解析 5613 对话 → 合并 **新增 44、变更 11 → 5745 对话 / 75634 消息**（=75286+348）。
+- manifest（out/manifest.json）：inputs 记 `str(path):sha256`，是增量跳过解析的依据。
 
-## scripts/archive_ai_chats.py（1227 行，解析器）
+## scripts/archive_ai_chats.py（1350 行，全量解析器）
 
-关键函数行号（文件变了要更新）：
-- `to_iso`47 `local_str`71 `norm_text`83 `sha256_file`92 `load_json_any`100
+关键函数行号：
+- `to_iso`47 `local_str`71 `norm_text`83 `sha256_file`92 `load_json_any`100 `extract_parts`119
 - `parse_chatgpt`149 `parse_deepseek`238（mapping+fragments：REQUEST/RESPONSE/THINK/SEARCH/FILE/TOOL_*，thinking 单独字段，时间 inserted_at）
-- Gemini：`normalize_gemini_turn`358 `gemini_turns_from_obj`391 `parse_gemini_ndjson`416
-- Gemini HTML 活动：`parse_activity_time`490 `html_to_text`504 `iter_activity_items`527 `parse_gemini_activity_items`550 `parse_gemini_activity_html`626 `is_activity_html`633 `parse_gemini_activity_file`691
-- Takeout 回填：`load_takeout`710 `build_takeout_index`747 `match_takeout`756 `backfill_gemini`790
-- 输出：`flatten`840 `slugify`862 `write_jsonl`870 `write_markdown`876 `write_sqlite`925
-- 发现：`archive_member_names`978 `_sniff_conversations_bytes`996 `sniff_conversations_kind`1004 `discover`1028 `main`1061
+- Gemini turn：`normalize_gemini_turn`358 `gemini_turns_from_obj`391 `parse_gemini_ndjson`416
+- Gemini HTML：`parse_activity_time`490 `html_to_text`504 `extract_html_attachments`518 `iter_activity_items`527 `parse_gemini_activity_items`550 `parse_gemini_activity_html`626 `is_activity_html`633
+- **Gemini JSON（新）**：`ACTIVITY_JSON_NAMES`641 `is_activity_json`644 `parse_gemini_activity_json`652；`extract_members_to_temp`748 `parse_gemini_activity_file`798（.json/.html 直读，压缩包按成员 predicate 分派）
+- Takeout 回填：`load_takeout`824 `build_takeout_index`861 `match_takeout`870 `backfill_gemini`904
+- 输出：`flatten`954 `slugify`976 `write_jsonl`984 `write_markdown`990 `write_sqlite`1039
+- 发现：`archive_member_names`1096 `sniff_conversations_kind`1122 `discover`1146 `main`1184
 
 要点：
 - ChatGPT/DeepSeek 都叫 `conversations.json`，靠嗅探区分（"fragments"→deepseek，"author"→chatgpt）。
-- `parse_gemini_activity_items`550：抓 `content-cell mdl-cell--6-col` div，CJK 日期正则取时间，URL 正则 `gemini.google.com/app/([0-9a-fA-F]{8,})` 取 cid，每事件产 user+assistant 两行，`gemini-unknown` 兜底 cid（会把无 URL 的并成一个对话，坑）；ndjson 兜底 id 是 `gemini-%04d` **按顺序编号、对输入顺序敏感**（唯一不稳定 id）。
-- `discover`1028：递归 raw/；conversations.json→嗅探分 chatgpt/deepseek；`myactivity.json`→takeout（**目前仅时间回填，未解析正文**）；zip/tar 内按成员分派；裸 activity html→activity；.ndjson 或名含 "gemini" 的 .json→gemini。
-- `write_sqlite`925：**先 unlink 再全量重建**（conversations/messages/messages_fts + 索引，executemany，每 2000 条 commit+throttle）→ 增量改造的对立面；message id AUTOINCREMENT **不稳定**，但没关系，分析按 conversation_id 关联。
-- `write_markdown`876：`out/md/<source>/%Y-…_<slug>_<cid前8>.md`。
-- `main`1061：argparse `--raw/--out/--chatgpt/--takeout/--takeout-html/--gemini/--deepseek/--match-threshold/--activity-tz-offset/--tz/--dry-run/--no-sqlite/--no-md/--nice/--throttle`；manifest inputs 记 `str(path):sha256`。
-- 全量重建 ~5 分钟（限速 throttle 0.05），幂等覆盖 out/；**Gemini 140MB HTML 解析是大头**（增量的价值 = 跳过它）。
+- `parse_gemini_activity_json`：json.load(utf-8-sig，list 或 {items:[]}) → 滤 header 含 gemini、title 匹配 `^(Prompted|Branched)\s` → 抽 prompt/time/cid（details[].url 正则，无则 gemini-unknown）/safeHtmlItem 回答过 html_to_text → 按 cid 分组产 user+assistant 行（同 ts、ts_source=native）；无 assistant 行的 conv 标 `_prompt_only=True`。
+- `write_sqlite`1039 **原子写（防断电）**：写 `path+".tmp"` 建全量三表（conversations/messages/messages_fts+索引）→ close → `os.replace(tmp, path)`；**不再先 unlink 正式库**。message id AUTOINCREMENT 不稳定，分析按 conversation_id 关联、不受影响。
+- `write_markdown`990：`out/md/<source>/%Y-…_<slug>_<cid前8>.md`；frontmatter 含 `conversation_id:` 行（可建 cid→文件索引）。
+- `discover`1146：递归 raw/；conversations.json→嗅探分 chatgpt/deepseek；`myactivity.json`→takeout（仅回填）；zip/tar 内按成员分派（activity html / is_activity_json / .ndjson / conversations.json）；**裸 .json 且 is_activity_json(完整路径)→activity**（判定先于 gemini 分支）；裸 activity html→activity；.ndjson 或名含 "gemini" 的 .json→gemini。
+- `main`1184：全量重建参数 `--raw/--out/--chatgpt/--takeout/--takeout-html/--gemini/--deepseek/--match-threshold/--activity-tz-offset/--tz/--dry-run/--no-sqlite/--no-md/--nice/--throttle`。**日常导入不要跑它**（全量重建 5 分钟+），跑 incremental.py。
+
+## scripts/incremental.py（663 行，智能增量导入——日常入口）
+
+关键函数行号：
+- `Runner`40：进度写 `work/import_progress.json`（原子+20s 心跳线程，字段 running/finished/phase/i/total/step/started/updated/ended_at/error/stats）+ 追加 `work/import.log`（带时间戳，grep -a 防 NUL）
+- `load_base`95（读 archive.sqlite；**sqlite_master 无表/损坏→返回 {}**，0 字节库不崩）；`load_base_jsonl`150（**优先读 out/normalized.jsonl**——jsonl 是解析完成标志、先于 md/sqlite 落盘 → 断电可续跑；jsonl 空才回退 DB）
+- `fingerprint`198（sha1 of 全部消息结构，不含 `_from`/`_prompt_only` 键）；`pick_conv`217（取消息多者，prompt_only 不覆盖富内容）；`merge`226：新增/变更判定 + **活动源保留规则：同 cid 且 new 是 activity 源且消息数≤base → keep base 不标 changed**（"只加新的"，不让 JSON 重解析覆盖旧 HTML 版）
+- `lookup_hash`256（manifest inputs 哈希比对，按精确路径+文件名后缀兜底）；`parse_one`267（kind 分派，conv 打 `_from` 标记；gemini 的 .json→parse_gemini_json/activity）
+- `build_md_index`289 / `write_md_delta`306（只重写新增/变更对话的 md，先删 `_{cid8}.md` 旧文件）
+- `llm_ready`333（llm.has_key()，**绝不打印 key**）；`run_cmd`341（subprocess，stdout→import.log）
+- `_analyzed_ids`350 / `_all_conv_ids`365；`run_analysis`377：pending=全 ids−done → fresh(=ids−done) 分块(400) `heuristic --ids` + `run --ids --force --topic self-psych`；stale(=changed∩done) `run --force --topic self-psych`；ready 时全局 pending 分块同样跑；**LLM 全部带 `--topic self-psych`（约定：只分析心理相关）**
+- `run_import`429：load_base(jsonl 优先) → discover 五元组(chatgpt,takeout,gemini,activity,deepseek) → 逐输入 sha256 与 manifest 比对跳过未变 → 解析变更 → merge → 条件 backfill → 写 jsonl → md 增量 → sqlite 原子重建 → manifest 合并
+- `build_parser`612：`--raw/--out/--work/--throttle/--tz/--match-threshold/--activity-tz-offset/--force-full/--analyze/--no-md/--no-sqlite/--dry-run/--parse-pause N`
+- `main`631：chdir(ROOT)、`tempfile.tempdir=work/tmp`（防解压进 /tmp）、Runner 起停、`--analyze` 串 run_analysis
+
+用法：`python3 scripts/incremental.py [--analyze] [--dry-run]`；断电后续跑=直接重跑（jsonl base+哈希跳过）。
 
 ## scripts/serve_archive.py（1329 行，Web 服务）
 
@@ -48,39 +64,51 @@
 - api_* 行号：stats190 conversations209 conversation255 search275 timeline297 day322 jump339 selection366/373 export391 `_analysis_conn`416 `_analysis_run`423（读 analysis_progress.json，running+90s 心跳判 alive/stale）analysis452 emotion505 topic_summary627 llm_config830/838 reports879-907 interpret933/951。
 - Handler1014：`send_json`1021 `send_text`1030 `_same_origin`1044（Origin 检查，无 Origin 放行）`_read_json`1056（Content-Length JSON 体）`post_llm`1072（OpenAI 兼容转发，SSE 流式）。
 - do_GET1136 → handle_api1149：/api/stats|conversations|conversation(format=md)|search|timeline|day|jump|summary|analysis|emotion|llm/config|interpret|reports|selection|export。
-- do_POST1200：`/api/llm` 走 post_llm；其余 `_read_json` 后路由 selection|llm/config|reports。**当前无文件上传接口、无导入接口**（待加 /api/upload + /api/import）。
+- do_POST1200：`/api/llm` 走 post_llm；其余 `_read_json` 后路由 selection|llm/config|reports。**尚无文件上传/导入接口**（任务 B 待做：/api/upload + /api/import）。
 - handle_static1231：限 WEB_DIR 内，gzip（>1024），no-cache → 改前端刷新即可。
 - 中文搜索用 LIKE（FTS5 unicode61 对中文无效）。
 
-## 分析机制（tools/analyze.py + analysis.py + heur.py）
+## 分析机制（tools/analyze.py 704 行 + analysis.py 507 行 + heur.py 309 行）
 
-- `work/analysis.sqlite` 独立于归档库，主键 **conversation_id**（analysis.py:38，每对话一行 upsert；analysis_errors / analysis_excluded 两张辅表）。归档重建不影响已有分析结果。
-- 当前状态：归档 5589 对话，已分析 5502（heur 4918 + glm-4.7-flash 584），pending 87。
-- 命令：`python3 tools/analyze.py {config|estimate|run|heuristic|status|timeline|tiers|show|mark-excluded}`；全局 `--db/--work/--analysis-db/--config`。
-- 过滤参数（run/estimate/heuristic 共用，analyze.py:683-691）：`--collection/--source/--from/--to/--min-msgs/--topic`。**没有 --ids/--new**（只有 mark-excluded 有 --ids）。
-- 自动跳过已分析（`_select_pending`139-158，`--force` 才重跑）；候选 ORDER BY created_at **升序**，`--limit` 优先最老 → 增量补析用 **`--from <日期>`** 圈时间窗。
-- **坑1**：非 --topic 模式下 heuristic 结果也算"已分析"，先跑 heuristic 再 run 不会用 LLM 升级（需 `--force` 或 `--topic`）。
-- **坑2**：run 的进度文件 `work/analysis_progress.json` **只有 cmd_run 写**（20s 心跳，字段 running/finished/started/i/total/ok/fail/cost/model…）；heuristic 不写进度。网页进度卡读的就是它（serve_archive `_analysis_run`423）。
-- heuristic 纯本地，全量 ~4.6 秒、0 token；run 走 work/llm.json（zhipu glm-4.7-flash 免费，key 已配，**值禁读禁打印**）。
-- `selection.jsonl` 是人工选集，**分析默认不读**（只有 --collection 才用）→ 导入后自动分析不需要动它。
-- 结论：导入后最小闭环 = `analyze.py heuristic --from <日>`（秒级垫底）+ `analyze.py run --from <日>`（LLM 补新对话）。
+analyze.py 行号：`_targets`71（SQL 过滤 + `--ids` 逗号 set 过滤 93-95 + min_msgs，ORDER BY created_at 升序）；`TOPIC_PRESETS`104（self-psych 正则：心理|情绪|焦虑|抑郁|自卑|内耗|社恐|社交恐惧|强迫|创伤|原生家庭|潜意识|咨询师|孤独|崩溃|躁郁|双相|精神科|自我怀疑|讨好型|安全感|想哭|难过|痛苦|委屈|沮丧|空虚|迷茫|失眠|睡不着|压力|害怕|不安）；**`_topic_rows`113（已修：扫 title+该对话全部消息全文，不再只扫首条用户消息前 800 字——旧版缺陷导致 0 命中，2026-10-10 修复，实测 166 pending→91 命中）**，含启发式 kind='情绪' 并集；`_select_pending`142（topic 模式 done 只算 model<>'heuristic'（heur 行不算已析→LLM 可覆盖）；excluded 任何模式排除；--force 绕过 done 不绕过 excluded）；`cmd_run`244（进度文件 `_progress_path`227=analysis_db 同目录 analysis_progress.json，20s 心跳，字段 running/finished/i/total/ok/fail/cost/model…，**只有 cmd_run 写**→网页进度卡读它）；`cmd_heuristic`386（本地秒级不写进度）；`build_parser`609；`_add_filter_args`685（`--ids/--collection/--source/--from/--to/--min-msgs/--topic`）。
+
+- `work/analysis.sqlite` 独立于归档库，主键 **conversation_id**（analysis.py:38 upsert INSERT OR REPLACE；analysis_errors / analysis_excluded 辅表）。归档重建不影响已有分析。
+- digest（analysis.py build_digest 251）：40 条采样首+均匀+尾、每条 700 字、总 6000 字、sanitize.mask 脱敏；SYSTEM_PROMPT 298（value 0-5、kind 九类、topics、sentiment、intensity、六情绪、summary≤60字，纯 JSON）。
+- heur.py：纯本地规则（KIND_RULES 含「情绪」正则、词典六情绪、CJK 2gram topics），0 token 全量 ~5 秒，`model='heuristic'` `prompt_version='heur-v1'`。
+- **约定：LLM 分析只跑心理相关**（`--topic self-psych`）；heuristic 可全量垫底。`selection.jsonl` 只有 `--collection` 才读，导入后自动分析不用动。
+- zhipu glm-4.7-flash 免费（work/llm.json，key 已配，**值禁读禁打印**）；`llm.has_key()` 判可用。
+- 增量补析：候选按 created_at 升序，`--limit` 优先最老 → 用 `--ids`（逗号）或 `--from <日期>` 圈定。
+
+## 当前状态（2026-10-10）
+
+- **数据**：归档 5745 对话 / 75634 消息（jsonl 173405728B、archive.sqlite 440352768B 原子重建版、md 5745+）；manifest 含 10-08 zip + 147MB JSON inputs。
+- **分析**：已分析 5579 / 失败 13 / keep 2340 / avg 2.37 / ¥0。pending 166（其中全文心理命中 **91**，ids 在 `work/.psych_ids.txt`）。fresh44（fedora 无过滤跑了 42，含少量非心理）+ stale11 + 本机误跑全局 12 个非心理——免费不可撤销。
+- **git**：HEAD b32ca13=origin/main。历史：8902f35（incremental+Gemini JSON+原子sqlite+analyze --ids）→97f233f（jsonl 续跑+parse-pause+切片工具）→b32ca13（run_analysis 加 --topic+pending 圈定）。之后改动：`_topic_rows` 全文扫描修复（本轮，待提交）。
+- **fedora 工作流**（重活都在这跑）：`export SSH_ASKPASS=~/.ssh/askpass.sh SSH_ASKPASS_REQUIRE=force; ssh -o BatchMode=no fedora '<cmd>'`；rsync 加 `-e "ssh -o BatchMode=no"`。fedora `~/ai-chat-archive`（非 git，代码/库与本机 rsync 同步），Python 3.14.8，work/llm.json 已在。启动：`ssh fedora 'systemd-run --user --collect --unit=<名> -p CPUQuota=50% nice -n 19 python3 $HOME/ai-chat-archive/<脚本> …'`；结果 rsync analysis.sqlite 回本机。
+- 常驻：web :8765（serve_archive，静态无缓存、库每请求新连接，换库即生效）；`archive-llm.service` 已停用（曾无限重启刷屏）。
+- 轮询：读 `work/import_progress.json` 的 running/finished/phase/step/error + `tail work/import.log`（grep -a 防 NUL）。工具超时 900s 杀前台杀不掉 --unit。
 
 ## 当前任务（进行中，完成后把状态改到这里）
 
 用户需求（原话）：
 1. 「现在有deepseek 10.08的导出，把新增的记录导进去，然后照惯例，分析心理内容。」
-2. 「我希望这个脚本可以智能一点，然后能够在网页端上传然后完成分析，把新增的内容搞进去，另外，很快gemini的json也要导入进来，所以写好功能，旧版本是html的，智能的点在于，能够把新的东西放进来。」
+2. 「我希望这个脚本可以智能一点，然后能够在网页端上传然后完成分析……很快gemini的json也要导入进来……智能的点在于，能够把新的东西放进来。」
+3. 「把本地分析放fedora跑，谢谢，我要睡了，你继续，不要再把这台机器搞崩了。」
+4. 「你根本没对新内容跑主题分析……好好读一遍整个项目，重新写好md再开工」
+5. 约定：「只跑心理相关的」（LLM 只跑 --topic self-psych）。
 
 拆解：
-- [ ] A. 智能增量导入：新模块 `scripts/incremental.py`（拟）——manifest sha256 跳过未变输入（省掉 Gemini 140MB 解析）；DB 里已有对话做基座，新解析的按 (source, conversation_id) 合并（指纹相同跳过、变了替换、DB 独有保留）；多份 deepseek 并存时按 cid 去重取消息多的；只重写变更对话的 md，jsonl 整体重写，sqlite 重建（幂等，analysis 靠 cid 不受影响）。
-- [ ] B. 网页上传闭环：serve_archive 加 `POST /api/upload`（字节体存 raw/，文件名消毒）+ `POST /api/import`（后台线程跑增量导入→自动 heuristic→LLM run）+ `GET /api/import`（进度，可复用 analysis_progress + import 日志）；web 前端加上传区+进度显示。
-- [ ] C. Gemini JSON：写 `parse_gemini_activity_json`（兼容 Takeout My Activity JSON 结构，抽 prompt/时间/cid，产出与 HTML 版同构 convs）；discover 把 myactivity.json 从"仅回填"升级为可解析正文，与 HTML 共存。
-- [ ] D. 导入 10-08 deepseek（10-01 改 .old）→ 跑分析 → status 验证 → commit+push。
+- [x] A. 智能增量导入 `scripts/incremental.py`（sha256 跳过未变输入、jsonl 优先 base 断电续跑、指纹合并、活动源只加新的、原子 sqlite）
+- [x] C. Gemini JSON 解析 `parse_gemini_activity_json` + discover 路由（AI Mode 排除），147MB 实测导入成功
+- [x] D. 导入 10-08 + 新 Takeout → 5745/75634 ✓（fedora 跑完回传）
+- [x] `_topic_rows` 全文扫描修复（本轮，91 命中验证 ✓）
+- [ ] 心理分析跑完：fedora 上 `heuristic --ids <166>` 垫底 → `run --ids <91 或 topic 全扫> --topic self-psych --force` → rsync 回本机 status 验证
+- [ ] B. 网页上传闭环：serve_archive 加 `POST /api/upload`（字节体存 raw/，文件名消毒）+ `POST/GET /api/import`（后台线程跑 incremental+分析，进度轮询）+ web 前端上传区
+- [ ] README 补 incremental/新参数/--topic 章节；AGENTS.md/analyze.py 修复 commit+push
 
 ## 环境与命令备忘
 
-- 限速跑：`systemd-run --user --scope -p CPUQuota=40% --collect nice -n 19 python3 scripts/archive_ai_chats.py --raw raw --out out --throttle 0.05`
-- 本机测试服务：`python3 scripts/serve_archive.py -v`（端口参数 `--port`；DB 缺失会提示先跑归档）。
-- 网页 systemd：`ai-archive-web.service`（改 serve_archive.py 后才需 restart）。
-- 自动提交推送：验证过就 `git add <相关文件> && git commit -m <中文> && git push`，不问；不提交密钥。
-- web 静态无缓存：改前端只刷新；带 `?v=` 的资源需硬刷的坑是 psy-scales 的，这里没有。
+- 限速跑（本机）：`systemd-run --user --collect --unit=ai-archive-importN -p CPUQuota=10% nice -n 19 python3 /home/SQL916/ai-chat-archive/scripts/incremental.py --analyze`
+- 状态：`python3 tools/analyze.py status`（轻，可本机跑）。
+- 自动提交推送：验证过就 `git add <相关文件> && git commit -m <中文> && git push`（本地分支 master，push 用 `git push origin HEAD:main`），不问；不提交密钥。
+- 凭据：SUDO_PASS/GH_TOKEN/SSH_PASS/LLM key 一律不打印不入文件；sudo 用 `echo "$SUDO_PASS" | sudo -S`。
