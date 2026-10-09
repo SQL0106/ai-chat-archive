@@ -147,6 +147,54 @@ def load_base(db_path):
     return base
 
 
+def load_base_jsonl(jsonl_path):
+    """从 out/normalized.jsonl 读回全部对话（断电续跑：jsonl 先于 md/sqlite 落盘）。"""
+    base = {}
+    p = Path(jsonl_path)
+    if not p.exists() or p.stat().st_size == 0:
+        return base
+    try:
+        with p.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                src = r.get("source") or ""
+                cid = r.get("conversation_id") or ""
+                if not cid:
+                    continue
+                key = (src, cid)
+                conv = base.get(key)
+                if conv is None:
+                    conv = {
+                        "source": src, "conversation_id": cid,
+                        "title": r.get("title") or "",
+                        "created_at": r.get("created_at") or "",
+                        "updated_at": r.get("updated_at") or "",
+                        "messages": [],
+                    }
+                    base[key] = conv
+                att = r.get("attachments")
+                if not isinstance(att, list):
+                    att = []
+                conv["messages"].append({
+                    "message_index": r.get("message_index"),
+                    "role": r.get("role") or "", "timestamp": r.get("timestamp") or "",
+                    "timestamp_source": r.get("timestamp_source") or "",
+                    "text": r.get("text") or "", "thinking": r.get("thinking") or "",
+                    "model": r.get("model") or "", "attachments": att,
+                })
+    except OSError:
+        return {}
+    for conv in base.values():
+        conv["messages"].sort(key=lambda m: (m.get("message_index") if m.get("message_index") is not None else 0))
+    return base
+
+
 def fingerprint(conv):
     msgs = sorted(conv.get("messages") or [], key=lambda m: (m.get("message_index") or 0))
     payload = {
@@ -361,8 +409,12 @@ def run_import(args, runner):
     manifest_path = out / "manifest.json"
 
     runner.update(phase="base", step="读取现有归档")
-    base = load_base(db_path)
-    runner.log("现有归档 %d 对话" % len(base))
+    base = load_base_jsonl(out / "normalized.jsonl")
+    if base:
+        runner.log("现有归档 %d 对话（来自 normalized.jsonl）" % len(base))
+    else:
+        base = load_base(db_path)
+        runner.log("现有归档 %d 对话（来自 archive.sqlite）" % len(base))
 
     chatgpt_files, takeout_files, gemini_files, activity_files, deepseek_files = aac.discover(raw)
     groups = ([("chatgpt", p) for p in chatgpt_files]
@@ -416,6 +468,9 @@ def run_import(args, runner):
         if kind in ("activity", "gemini"):
             gemini_reparsed = True
         runner.update(i=i + 1)
+        if i < len(plan) - 1 and args.parse_pause > 0:
+            runner.update(step="解析完成，散热等待 %.0fs" % args.parse_pause)
+            time.sleep(args.parse_pause)
     runner.log("新解析 %d 对话" % len(new_convs))
 
     merged, added, changed = merge(base, new_convs)
@@ -541,6 +596,8 @@ def build_parser():
     ap.add_argument("--match-threshold", type=float, default=0.90)
     ap.add_argument("--activity-tz-offset", type=float, default=8.0)
     ap.add_argument("--force-full", action="store_true", help="忽略哈希缓存全量重解析")
+    ap.add_argument("--parse-pause", type=float, default=0.0,
+                    help="每个输入解析完后的散热等待秒数（防高温复位）")
     ap.add_argument("--analyze", action="store_true", help="导入后自动跑 heuristic+LLM 分析")
     ap.add_argument("--no-md", action="store_true", help="不写 Markdown")
     ap.add_argument("--no-sqlite", action="store_true", help="不写 sqlite")
