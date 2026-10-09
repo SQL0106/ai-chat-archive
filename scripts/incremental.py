@@ -362,16 +362,30 @@ def _analyzed_ids(work):
         return set()
 
 
-def run_analysis(runner, added_ids, changed_ids, work):
+def _all_conv_ids(db):
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        try:
+            return sorted({r[0] for r in conn.execute(
+                "SELECT conversation_id FROM conversations")})
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+
+def run_analysis(runner, added_ids, changed_ids, work, db=""):
     """只对未分析的 id 跑 heuristic+LLM（--force 仅限 fresh/stale 集合），
-    防止 DB 重跑后 added 覆盖全量导致把已分析的 5500+ 全部重跑。"""
+    防止 DB 重跑后 added 覆盖全量导致把已分析的 5500+ 全部重跑。
+    约定：LLM 只跑心理相关（--topic self-psych），heuristic 全量跑垫底。"""
     done = _analyzed_ids(work)
     ids = sorted(set(added_ids) | set(changed_ids))
     fresh = [i for i in ids if i not in done]
     stale = sorted(set(changed_ids) & done)
+    pending = [i for i in _all_conv_ids(db) if i not in done] if db else []
     ready = llm_ready()
-    runner.log("分析范围: 新增未析 %d，变更需重析 %d，已析跳过 %d"
-               % (len(fresh), len(stale), len(ids) - len(fresh)))
+    runner.log("分析范围: 新增未析 %d，变更需重析 %d，已析跳过 %d，全局 pending %d"
+               % (len(fresh), len(stale), len(ids) - len(fresh), len(pending)))
 
     def chunks(seq, n=400):
         return [seq[i:i + n] for i in range(0, len(seq), n)]
@@ -384,17 +398,26 @@ def run_analysis(runner, added_ids, changed_ids, work):
                        "--ids", ",".join(ch)]))
         if ready:
             steps.append(("analyze:llm",
-                          "LLM 分析 %d 个新对话" % len(ch),
+                          "LLM 分析 %d 个新对话（仅心理）" % len(ch),
                           [sys.executable, "tools/analyze.py", "run",
-                           "--ids", ",".join(ch), "--force"]))
+                           "--ids", ",".join(ch), "--force",
+                           "--topic", "self-psych"]))
     if ready:
         for ch in chunks(stale):
             steps.append(("analyze:llm",
-                          "LLM 重析 %d 个变更对话" % len(ch),
+                          "LLM 重析 %d 个变更对话（仅心理）" % len(ch),
                           [sys.executable, "tools/analyze.py", "run",
-                           "--ids", ",".join(ch), "--force"]))
-        steps.append(("analyze:pending", "补析全局 pending 对话",
-                      [sys.executable, "tools/analyze.py", "run"]))
+                           "--ids", ",".join(ch), "--force",
+                           "--topic", "self-psych"]))
+        for ch in chunks(pending):
+            steps.append(("analyze:heur",
+                          "heuristic 垫底 %d 个 pending" % len(ch),
+                          [sys.executable, "tools/analyze.py", "heuristic",
+                           "--ids", ",".join(ch)]))
+            steps.append(("analyze:pending",
+                          "补析全局 pending（仅心理）%d" % len(ch),
+                          [sys.executable, "tools/analyze.py", "run",
+                           "--ids", ",".join(ch), "--topic", "self-psych"]))
     else:
         runner.log("LLM key 不可用，跳过 LLM 分析")
     for i, (phase, msg, cmd) in enumerate(steps):
@@ -620,7 +643,8 @@ def main():
         summary = run_import(args, runner)
         if args.analyze and not args.dry_run:
             run_analysis(runner, summary.get("added_ids") or [],
-                         summary.get("changed_ids") or [], args.work)
+                         summary.get("changed_ids") or [], args.work,
+                         str(Path(args.out) / "archive.sqlite"))
         pub = {k: v for k, v in summary.items()
                if k not in ("added_ids", "changed_ids")}
         runner.log("导入完成: %s" % json.dumps(pub, ensure_ascii=False))
