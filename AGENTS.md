@@ -106,7 +106,7 @@ analyze.py 行号：`_targets`71（SQL 过滤 + `--ids` 逗号 set 过滤 93-95 
 - [x] _topic_rows 全文扫描修复（实测 91 命中）+ 心理分析全部跑完（5745/5745，fedora 执行回传）
 - [x] B. 网页上传闭环：POST /api/upload（原始字节体+X-Filename→raw/）、POST/GET /api/import（后台线程跑 incremental --analyze、防重入、180s 心跳时效）、智能页上传导入卡+2.5s 轮询；py_compile+node --check+接口实测全过（upload 落盘、import 8 秒完成 skipped 3）
 - [x] 冰箱压测（冷机秒死 → 供电问题结论，.agent/stress_test.py + stress.log）
-- [ ] README 补 incremental/上传导入/--topic 章节（AGENTS.md 已更新）
+- [x] README 补 incremental/上传导入/--topic 章节（2026-10-10 完成，全部任务闭环）
 
 ## 环境与命令备忘
 

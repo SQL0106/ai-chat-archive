@@ -66,6 +66,11 @@ DeepSeek 的 `mapping` 里每个节点是 `{model, inserted_at, fragments[]}`，
 
 > 实测这个 HTML 里 prompt 和回答都全，且带时间，所以**不需要**再跑油猴脚本。
 
+**新版 Takeout 的 JSON 同样支持**（2026-10 起）：Takeout → `My Activity` → 格式选 **JSON** 得到的
+`Takeout/我的活动/Gemini Apps/我的活动记录.json`（或整个 `.tgz`）直接丢进 `raw/` 即可，
+信息与 HTML 等同（prompt + 回答 + 原生时间 + 对话 ID）。同目录 **AI Mode** 的同名 JSON
+会被自动排除，不会混入。
+
 **备选方案（仅当 HTML 里没有回答时）**
 
 | 文件 | 来源 | 提供什么 |
@@ -109,6 +114,27 @@ python3 scripts/archive_ai_chats.py --raw raw --out out --dry-run
 
 重复运行会覆盖 `out/`，是幂等的。
 
+### 日常增量导入（推荐入口）
+
+日常追加新导出**不要跑全量**，用 `scripts/incremental.py`：
+
+```bash
+python3 scripts/incremental.py --analyze   # 导入新内容 + 自动补分析
+python3 scripts/incremental.py --dry-run   # 只看会新增/变更多少，不写盘
+```
+
+- 按 `out/manifest.json` 记录的 sha256 **跳过没变的输入**（147MB 的 Gemini JSON 不用反复解析）；
+- 只解析变了的输入，按 `(source, conversation_id)` 指纹合并：新增对话加入、内容变了才覆盖；
+  同 cid 的 Gemini 活动记录**只加新的**（JSON 重解析结果不会拿 prompt-only 覆盖旧富内容）；
+- 只重写变更对话的 Markdown；SQLite **原子重建**（`.tmp` + `os.replace`，断电不毁旧库）；
+- **断电续跑 = 直接重跑**：`out/normalized.jsonl` 是解析完成标志、优先作 base，输入哈希全匹配时秒过；
+- 进度/日志：`work/import_progress.json` + `work/import.log`（网页轮询同一个进度文件）；
+- `--analyze` 自动串分析链：新/变更对话先 `heuristic` 垫底，再 LLM 只跑心理相关
+  （`--ids … --topic self-psych`；约定：LLM 不分析非心理内容），最后补全局 pending。
+
+常用参数：`--force-full` 强制全部重解析、`--no-md` / `--no-sqlite` 跳过对应写出、
+`--parse-pause 15` 每个输入解析完歇 15 秒散热、`--dry-run` 演练。
+
 ### 低功耗运行（这台机器供电弱，会因负载过高复位）
 
 全量解析 + 写 5479 个 Markdown + 71572 行 SQLite 有 CPU/IO 压力，建议限速跑：
@@ -147,6 +173,12 @@ python3 scripts/serve_archive.py --db out/archive.sqlite --web web --port 8765
 - 阅读器顶部有 **☆ 加入选集** 和 **下载**（Markdown）。URL 可直接分享：`#c=<对话ID>&i=<消息序号>&q=<搜索词>`。
 
 静态文件是每次从磁盘读、带 `Cache-Control: no-cache`，所以改前端只要刷新浏览器，不用重启服务。
+
+**网页端增量导入**：「智能」页顶部的**数据导入**卡可以多选导出文件直接上传——
+`POST /api/upload`（原始字节体 + `X-Filename` 头，文件名消毒后落 `raw/`，单文件上限 2GB），
+点「上传并导入」后后台线程跑 `incremental.py --analyze`（`POST /api/import`，防重入：
+已有线程或 5 分钟内心跳中的外部进程都会拒绝重复启动），
+页面每 2.5 秒轮询 `GET /api/import` 显示阶段/进度/日志尾；进度心跳超 180 秒自动判为陈旧。
 
 ### 作为 systemd 服务常驻
 
@@ -256,6 +288,11 @@ python3 tools/analyze.py estimate --sample 20   # 抽样估算 token 与花费
 python3 tools/analyze.py run --limit 200        # 只分析前 200 个未分析的对话
 python3 tools/analyze.py run --dry-run          # 只构造摘要、不调接口（看效果）
 ```
+
+常用过滤参数（`estimate` / `run` / `heuristic` 通用）：`--ids id1,id2,…` 只分析指定对话、
+`--topic self-psych` 只分析心理相关（标题 + **全部消息全文**命中关键词，或启发式判为「情绪」）、
+`--from` / `--to` 时间窗、`--source` 来源、`--collection` 选集、`--force` 忽略"已分析"标记重跑。
+**本仓库约定 LLM 只跑心理相关**，导入后的自动分析链（`incremental.py --analyze`）已内置该过滤。
 
 整库（约 5500 个对话）用 `deepseek-chat` 估算约 1200 万输入 token、100 万输出 token，
 折合人民币 30 元出头——所以**默认不会自动跑**，请自己按需限量执行。
@@ -402,6 +439,13 @@ ORDER BY timestamp;
   换成 `trigram` 分词器要重建几百 MB 索引，这台机器空间和供电都不划算，暂时不动。
 
 ## 待办 / 可继续的方向
+
+- [x] **增量导入 + 网页上传 + 心理分析闭环** · 2026-10-10 完成：
+  `scripts/incremental.py`（sha256 跳过未变输入、jsonl 优先 base 断电续跑、指纹合并、活动源只加新的、
+  原子 SQLite、`--analyze` 自动串 heuristic+LLM 心理链）；Gemini Takeout **JSON** 活动记录解析器；
+  网页「智能」页数据导入卡（`/api/upload` + `/api/import` 上传→增量→分析→进度轮询）；
+  `analyze.py` 新增 `--ids`、`--topic` 主题过滤改为**全文扫描**（此前只扫首条消息前 800 字导致 0 命中）；
+  归档 5745 对话全部分析完毕（pending=0，LLM 只跑 `--topic self-psych`，全程 ¥0）。
 
 - [x] **优化网页**（性能）· 2026-10-01 完成，实测（chrome-devtools）：
   - 时间线由「每点 2 个 SVG rect」改为 **canvas 单元素绘制 + dpr 缩放**（悬停用坐标反算，不建命中区，换主题自动重画）：
