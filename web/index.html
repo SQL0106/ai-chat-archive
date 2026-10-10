@@ -361,6 +361,19 @@ try {
   <section id="tab-llm" class="panel">
     <div class="page">
       <div class="card">
+        <h3>数据导入 · 上传导出文件 → 自动增量导入 → 自动跑心理分析</h3>
+        <div class="filters">
+          <input type="file" id="impFiles" multiple accept=".zip,.json,.tgz,.tar,.gz,.html,.ndjson,.jsonl">
+          <button id="impUpload" class="primary">上传并导入</button>
+          <button id="impRefresh">刷新状态</button>
+        </div>
+        <p class="hint">支持 ChatGPT / DeepSeek 导出 zip、Gemini Takeout（活动记录 HTML/JSON、tgz、ndjson）。
+          只合并新增内容（未变化的输入按 sha256 跳过），导入后自动对心理相关对话跑 heuristic + LLM 分析。</p>
+        <p id="impState" class="hint"></p>
+        <div id="impLog" class="llm-out" style="max-height:220px;overflow:auto;white-space:pre-wrap"></div>
+      </div>
+
+      <div class="card">
         <h3>接口配置 · 兼容 OpenAI（默认 DeepSeek / 智谱），key 只存本机 work/llm.json</h3>
         <div class="filters">
           <label class="inline">预设 <select id="llmPreset"></select></label>

@@ -1210,6 +1210,92 @@ async function loadConvAnalysis(id, token) {
   if (r.summary) box.appendChild(el('span', 'ana-summary', r.summary));
 }
 
+/* ---------------- 数据导入（上传 + 增量导入进度） ---------------- */
+let impTimer = null;
+
+function impSetState(txt) {
+  const el = $('#impState');
+  if (el) el.textContent = txt;
+}
+
+async function impRefresh() {
+  let d;
+  try {
+    const r = await fetch('/api/import');
+    d = await r.json();
+  } catch (_) { return; }
+  const p = d.progress;
+  let s;
+  if (d.running && p) {
+    s = '导入中：' + (p.phase || '') + (p.step ? ' · ' + p.step : '') +
+        (p.total ? '（' + (p.i || 0) + '/' + p.total + '）' : '');
+  } else if (p && p.finished) {
+    s = p.error
+      ? ('上次导入失败：' + p.error)
+      : ('上次导入完成' + (p.stats
+          ? '：新增 ' + (p.stats.added || 0) + '、变更 ' + (p.stats.changed || 0) +
+            '，共 ' + (p.stats.conversations || '?') + ' 对话'
+          : ''));
+  } else {
+    s = '空闲。选择导出文件后点「上传并导入」。';
+  }
+  impSetState(s);
+  const log = $('#impLog');
+  if (log && d.log) {
+    const near = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+    log.textContent = d.log;
+    if (near) log.scrollTop = log.scrollHeight;
+  }
+  if (d.running) {
+    if (!impTimer) impTimer = setInterval(() => impRefresh().catch(() => {}), 2500);
+  } else {
+    if (impTimer) { clearInterval(impTimer); impTimer = null; }
+    if (p && p.finished && p.stats && p.stats.conversations) {
+      loadStats().catch(() => {});
+      if (ana.loaded) loadAnaStatus().catch(() => {});
+    }
+  }
+}
+
+async function impUpload() {
+  const inp = $('#impFiles');
+  const files = Array.from(inp.files || []);
+  if (!files.length) { toast('先选择要上传的导出文件'); return; }
+  const btn = $('#impUpload');
+  btn.disabled = true;
+  try {
+    for (const f of files) {
+      impSetState('上传中：' + f.name + '（' + Math.round(f.size / 1048576) + ' MB）');
+      const buf = await f.arrayBuffer();
+      const r = await fetch('/api/upload', {
+        method: 'POST',
+        headers: {
+          'X-Filename': encodeURIComponent(f.name),
+          'Content-Type': 'application/octet-stream',
+        },
+        body: buf,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('上传失败 HTTP ' + r.status));
+    }
+    impSetState('上传完成，启动增量导入…');
+    const r2 = await fetch('/api/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ analyze: true }),
+    });
+    const d2 = await r2.json().catch(() => ({}));
+    if (!r2.ok || !d2.ok) throw new Error(d2.error || '启动导入失败');
+    toast(d2.started ? '导入已启动' : (d2.reason || '导入进行中'));
+    impRefresh().catch(() => {});
+  } catch (e) {
+    impSetState('失败：' + e.message);
+    toast('导入失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /* ---------------- 智能（LLM 接口 + 解读） ---------------- */
 const llmUI = { presets: [], loaded: false, controller: null, report: null };
 
@@ -1839,6 +1925,9 @@ function init() {
   loadTiers().catch(() => {});
 
   // 智能
+  $('#impUpload').onclick = () => impUpload();
+  $('#impRefresh').onclick = () => impRefresh().catch(() => {});
+  impRefresh().catch(() => {});
   $('#llmPreset').onchange = () => {
     const p = llmUI.presets.find((x) => x.name === $('#llmPreset').value);
     if (p) {

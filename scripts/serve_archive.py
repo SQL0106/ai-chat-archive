@@ -26,6 +26,9 @@
     GET  /api/summary         主题阶段总结（按主题口径聚合分析结果，确定性生成）
     GET  /api/reports         已保存的智能解读列表
     POST /api/reports         保存 / 删除一条智能解读 (remove=id)
+    POST /api/upload          上传导出文件（原始字节体 + X-Filename 头）→ 存到 raw/
+    POST /api/import          后台启动增量导入（body {"analyze": true}，防重入）
+    GET  /api/import          增量导入进度 + 日志尾部
 
 时区: 所有时间戳在库里是 UTC，本服务按 UTC+8 展示/过滤（可用 --tz-offset 改）。
 """
@@ -38,7 +41,9 @@ import os
 import re
 import socket
 import sqlite3
+import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -70,6 +75,9 @@ REPORT_MAX = 60
 LLM_TIMEOUT = 600
 INTERPRET_MAX = 40000
 FTS_OPERATORS = re.compile(r'["()*]|\b(AND|OR|NOT|NEAR)\b', re.IGNORECASE)
+UPLOAD_MAX = 2 * 1024 * 1024 * 1024  # 单文件 2GB 上限
+IMPORT_LOG_TAIL = 8192
+_IMPORT = {"thread": None}
 
 
 # --------------------------------------------------------------------------
@@ -1011,6 +1019,85 @@ def api_interpret(conn, qs):
 # HTTP
 # --------------------------------------------------------------------------
 
+def _safe_upload_name(name):
+    """把客户端给的文件名压成 raw/ 下的安全basename；非法返回 None。"""
+    name = unquote(name or "").replace("\\", "/").split("/")[-1]
+    name = "".join(ch for ch in name.strip() if ch >= " " and ch != "\x7f")
+    if not name or name in (".", "..") or name.startswith("."):
+        return None
+    return name[:180]
+
+
+def api_import_status():
+    """GET /api/import：增量导入进度 + 日志尾部。"""
+    out = {"running": False, "progress": None, "log": ""}
+    t = _IMPORT.get("thread")
+    try:
+        d = json.loads((WORK_DIR / "import_progress.json").read_text("utf-8"))
+        out["progress"] = d
+        if d.get("running"):
+            out["running"] = True
+    except (OSError, ValueError):
+        pass
+    if t and t.is_alive():
+        out["running"] = True
+    try:
+        blob = (WORK_DIR / "import.log").read_bytes()[-IMPORT_LOG_TAIL:]
+        text = blob.decode("utf-8", "replace").replace("\x00", "")
+        out["log"] = "\n".join(text.splitlines()[-60:])
+    except OSError:
+        pass
+    return out
+
+
+def api_import_start(payload):
+    """POST /api/import：后台线程跑 incremental.py [--analyze]，防重入。"""
+    t = _IMPORT.get("thread")
+    if t and t.is_alive():
+        return {"ok": True, "started": False, "reason": "导入已在进行中"}, 200
+    # 进度文件 5 分钟内仍在心跳 → 可能是外部进程（如 systemd 单元）在跑
+    try:
+        d = json.loads((WORK_DIR / "import_progress.json").read_text("utf-8"))
+        if d.get("running") and d.get("updated"):
+            age = (datetime.now(timezone.utc) -
+                   datetime.fromisoformat(d["updated"])).total_seconds()
+            if 0 <= age < 300:
+                return {"ok": True, "started": False, "reason": "导入已在进行中（外部进程）"}, 200
+    except (OSError, ValueError, TypeError):
+        pass
+    script = ROOT / "scripts" / "incremental.py"
+    if not script.is_file():
+        return {"ok": False, "error": "scripts/incremental.py 不存在"}, 500
+    cmd = [sys.executable, str(script)]
+    if payload.get("analyze", True):
+        cmd.append("--analyze")
+    try:
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "error": "无法创建 work/: %s" % e}, 500
+
+    def _run():
+        try:
+            with open(WORK_DIR / "import.log", "ab") as logf:
+                logf.write(("\n[%s] web 触发导入: %s\n" % (
+                    datetime.now().isoformat(timespec="seconds"),
+                    " ".join(cmd))).encode("utf-8"))
+                logf.flush()
+                subprocess.call(cmd, cwd=str(ROOT), stdout=logf,
+                                stderr=subprocess.STDOUT)
+        except OSError as e:
+            try:
+                with open(WORK_DIR / "import.log", "ab") as logf:
+                    logf.write(("导入线程启动失败: %s\n" % e).encode("utf-8"))
+            except OSError:
+                pass
+
+    th = threading.Thread(target=_run, daemon=True)
+    _IMPORT["thread"] = th
+    th.start()
+    return {"ok": True, "started": True}, 200
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ArchiveViewer/1.0"
 
@@ -1068,6 +1155,52 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ValueError("请求体必须是 JSON 对象")
         return payload
+
+    def api_upload(self):
+        """POST /api/upload：原始字节体，文件名取 X-Filename 头，落 raw/。"""
+        name = _safe_upload_name(self.headers.get("X-Filename", ""))
+        if not name:
+            return self.send_json({"ok": False, "error": "缺少或非法的 X-Filename"}, 400)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return self.send_json({"ok": False, "error": "请求体为空"}, 400)
+        if length > UPLOAD_MAX:
+            return self.send_json({"ok": False, "error": "文件超过 2GB 上限"}, 413)
+        raw_dir = ROOT / "raw"
+        try:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return self.send_json({"ok": False, "error": "无法创建 raw/: %s" % e}, 500)
+        dest = raw_dir / name
+        part = raw_dir / (name + ".part")
+        existed = dest.exists()
+        remaining = length
+        try:
+            with open(part, "wb") as f:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            if remaining > 0:
+                try:
+                    part.unlink()
+                except OSError:
+                    pass
+                return self.send_json({"ok": False, "error": "上传中断，已清理"}, 400)
+            os.replace(part, dest)
+        except OSError as e:
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            return self.send_json({"ok": False, "error": str(e)}, 500)
+        return self.send_json({"ok": True, "file": "raw/" + name,
+                               "size": length, "overwritten": existed})
 
     def post_llm(self, payload):
         """转发到上游 OpenAI 兼容 /chat/completions；stream=true 时走 SSE。"""
@@ -1147,6 +1280,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "%s: %s" % (type(e).__name__, e)}, 500)
 
     def handle_api(self, path, qs):
+        if path == "/api/import":
+            return self.send_json(api_import_status())
         conn = connect()
         try:
             if path == "/api/stats":
@@ -1203,6 +1338,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not self._same_origin():
                 return self.send_json({"error": "跨站请求被拒绝"}, 403)
+            if path == "/api/upload":
+                return self.api_upload()
             if path == "/api/llm":
                 try:
                     payload = self._read_json()
@@ -1213,6 +1350,9 @@ class Handler(BaseHTTPRequestHandler):
                 payload = self._read_json()
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
+            if path == "/api/import":
+                data, status = api_import_start(payload)
+                return self.send_json(data, status)
             if path == "/api/selection":
                 data, status = api_selection_add(payload)
                 return self.send_json(data, status)
