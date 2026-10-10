@@ -1036,7 +1036,17 @@ def api_import_status():
         d = json.loads((WORK_DIR / "import_progress.json").read_text("utf-8"))
         out["progress"] = d
         if d.get("running"):
-            out["running"] = True
+            # 心跳超过 180s 视为陈旧（进程已死或历史残留文件）
+            try:
+                age = (datetime.now(timezone.utc) -
+                       datetime.fromisoformat(d["updated"])).total_seconds()
+                fresh = 0 <= age < 180
+            except (ValueError, TypeError):
+                fresh = False
+            if fresh:
+                out["running"] = True
+            else:
+                out["stale"] = True
     except (OSError, ValueError):
         pass
     if t and t.is_alive():

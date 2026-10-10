@@ -79,16 +79,17 @@ analyze.py 行号：`_targets`71（SQL 过滤 + `--ids` 逗号 set 过滤 93-95 
 - zhipu glm-4.7-flash 免费（work/llm.json，key 已配，**值禁读禁打印**）；`llm.has_key()` 判可用。
 - 增量补析：候选按 created_at 升序，`--limit` 优先最老 → 用 `--ids`（逗号）或 `--from <日期>` 圈定。
 
-## 当前状态（2026-10-10）
+## 当前状态（2026-10-10 晚）
 
-- **数据**：归档 5745 对话 / 75634 消息（jsonl 173405728B、archive.sqlite 440352768B 原子重建版、md 5745+）；manifest 含 10-08 zip + 147MB JSON inputs。
-- **分析**：已分析 5579 / 失败 13 / keep 2340 / avg 2.37 / ¥0。pending 166（其中全文心理命中 **91**，ids 在 `work/.psych_ids.txt`）。fresh44（fedora 无过滤跑了 42，含少量非心理）+ stale11 + 本机误跑全局 12 个非心理——免费不可撤销。
-- **git**：HEAD b32ca13=origin/main。历史：8902f35（incremental+Gemini JSON+原子sqlite+analyze --ids）→97f233f（jsonl 续跑+parse-pause+切片工具）→b32ca13（run_analysis 加 --topic+pending 圈定）。之后改动：`_topic_rows` 全文扫描修复（本轮，待提交）。
-- **fedora 工作流**（重活都在这跑）：`export SSH_ASKPASS=~/.ssh/askpass.sh SSH_ASKPASS_REQUIRE=force; ssh -o BatchMode=no fedora '<cmd>'`；rsync 加 `-e "ssh -o BatchMode=no"`。fedora `~/ai-chat-archive`（非 git，代码/库与本机 rsync 同步），Python 3.14.8，work/llm.json 已在。启动：`ssh fedora 'systemd-run --user --collect --unit=<名> -p CPUQuota=50% nice -n 19 python3 $HOME/ai-chat-archive/<脚本> …'`；结果 rsync analysis.sqlite 回本机。
-- 常驻：web :8765（serve_archive，静态无缓存、库每请求新连接，换库即生效）；`archive-llm.service` 已停用（曾无限重启刷屏）。
-- 轮询：读 `work/import_progress.json` 的 running/finished/phase/step/error + `tail work/import.log`（grep -a 防 NUL）。工具超时 900s 杀前台杀不掉 --unit。
+- **数据**：归档 5745 对话 / 75634 消息（jsonl、archive.sqlite 原子重建版、md 同步）；oneplus8 与 fedora 的 out/ 同源；manifest 三输入哈希匹配（增量 skipped 3 实测 8 秒完成）。
+- **分析**：**5745/5745 全部分析完毕（pending=0）** / 失败 14（历史 error 计数）/ keep 2465 / avg 2.40 / ¥0。fedora 心理批完成：stale 6 + 关键词 91（90 成功、1 内容过滤排除），analysis.sqlite 已回传本机。
+- **git**：HEAD 见 `git log`，最新含 46480fd（网页上传导入闭环）。历史：8902f35→97f233f→b32ca13→2ce1bed→(本轮)。本地分支 master，push 用 `git push origin HEAD:main`。
+- **fedora 工作流**：`export SSH_ASKPASS=~/.ssh/askpass.sh SSH_ASKPASS_REQUIRE=force; ssh -o BatchMode=no fedora '<cmd>'`；fedora `~/ai-chat-archive`（非 git）。**systemd-run 不继承 shell 的 cd → 必须加 `-p WorkingDirectory=<repo>`**（psych 首启曾因 cwd=$HOME 失败 exit 2）；stdout 落文件用 `-p StandardOutput=append:<绝对路径>`（重定向符只会捕到 systemd-run 自己的输出）。
+- **冰箱压测结论（2026-10-10）**：新电池（健康 97.5%，4160/4270mAh）+ 冰箱冷机（电池 20°C、CPU 33-39°C）下复现 import4-7 致死负载（.agent/stress_test.py，tgz→147MB JSON 解析），**<5 秒即复位**（.agent/stress.log 连一条心跳都没写完）→ **高温虚焊排除，供电问题坐实**：主线内核缺厂商电源管理协调（PMIC OCP/充电限流/瞬态电流预算），负载尖峰撞硬件保护硬断电，与温度无关；pstore 恒空。对策：重活只放 fedora；本机跑重活用 CPUQuota/降频拖延（10% 配额也死过，只是更久），治本需调内核电源参数。
+- **web**：serve 常驻 **系统级** `/etc/systemd/system/ai-archive-web.service`（不是 --user！），改 serve_archive.py 后 `echo "$SUDO_PASS" | sudo -S systemctl restart ai-archive-web`；静态无缓存、改前端刷新即生效；库每请求新连接，换库即生效。
+- 轮询：work/import_progress.json + work/import.log（grep -a 防 NUL）；**import 状态接口自带 180s 心跳时效判断**（陈旧 running:true 自动判 stale）。工具超时 900s 杀前台杀不掉 --unit。
 
-## 当前任务（进行中，完成后把状态改到这里）
+## 当前任务（2026-10-10 晚更新）
 
 用户需求（原话）：
 1. 「现在有deepseek 10.08的导出，把新增的记录导进去，然后照惯例，分析心理内容。」
@@ -96,15 +97,16 @@ analyze.py 行号：`_targets`71（SQL 过滤 + `--ids` 逗号 set 过滤 93-95 
 3. 「把本地分析放fedora跑，谢谢，我要睡了，你继续，不要再把这台机器搞崩了。」
 4. 「你根本没对新内容跑主题分析……好好读一遍整个项目，重新写好md再开工」
 5. 约定：「只跑心理相关的」（LLM 只跑 --topic self-psych）。
+6. 「我放冰箱了，看看到底是供电问题还是这台机子高温虚焊」→ 已测，结论见上（供电问题）。
 
 拆解：
-- [x] A. 智能增量导入 `scripts/incremental.py`（sha256 跳过未变输入、jsonl 优先 base 断电续跑、指纹合并、活动源只加新的、原子 sqlite）
-- [x] C. Gemini JSON 解析 `parse_gemini_activity_json` + discover 路由（AI Mode 排除），147MB 实测导入成功
-- [x] D. 导入 10-08 + 新 Takeout → 5745/75634 ✓（fedora 跑完回传）
-- [x] `_topic_rows` 全文扫描修复（本轮，91 命中验证 ✓）
-- [ ] 心理分析跑完：fedora 上 `heuristic --ids <166>` 垫底 → `run --ids <91 或 topic 全扫> --topic self-psych --force` → rsync 回本机 status 验证
-- [ ] B. 网页上传闭环：serve_archive 加 `POST /api/upload`（字节体存 raw/，文件名消毒）+ `POST/GET /api/import`（后台线程跑 incremental+分析，进度轮询）+ web 前端上传区
-- [ ] README 补 incremental/新参数/--topic 章节；AGENTS.md/analyze.py 修复 commit+push
+- [x] A. 智能增量导入 scripts/incremental.py（sha256 跳过、jsonl 优先 base、指纹合并、活动源只加新的、原子 sqlite、--parse-pause）
+- [x] C. Gemini Takeout JSON 解析 parse_gemini_activity_json + discover 路由（AI Mode 排除）
+- [x] D. 导入 10-08 + 新 Takeout → 5745/75634 ✓
+- [x] _topic_rows 全文扫描修复（实测 91 命中）+ 心理分析全部跑完（5745/5745，fedora 执行回传）
+- [x] B. 网页上传闭环：POST /api/upload（原始字节体+X-Filename→raw/）、POST/GET /api/import（后台线程跑 incremental --analyze、防重入、180s 心跳时效）、智能页上传导入卡+2.5s 轮询；py_compile+node --check+接口实测全过（upload 落盘、import 8 秒完成 skipped 3）
+- [x] 冰箱压测（冷机秒死 → 供电问题结论，.agent/stress_test.py + stress.log）
+- [ ] README 补 incremental/上传导入/--topic 章节（AGENTS.md 已更新）
 
 ## 环境与命令备忘
 
