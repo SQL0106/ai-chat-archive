@@ -99,17 +99,65 @@ function safeUrl(u) {
 const escHtml = (s) => String(s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/* 轻量 markdown 渲染（借自 psy-scales js/interview.js mdBlock，先转义再转标签） */
+function mdInline(s) {
+  return escHtml(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>');
+}
+
 function renderRich(text) {
-  const parts = String(text || '').split('```');
-  let html = '';
-  parts.forEach((p, i) => {
-    if (i % 2 === 1) {
-      const code = p.replace(/^[a-zA-Z0-9_+#-]*\r?\n/, '');
-      html += '<pre class="code"><code>' + escHtml(code) + '</code></pre>';
+  const lines = String(text || '').split('\n');
+  let html = '', list = null, ltype = '', inCode = false, codeBuf = [];
+  let quote = false, tbl = false;
+  const flush = () => { if (list) { html += '</' + ltype + '>'; list = null; ltype = ''; } };
+  const flushQuote = () => { if (quote) { html += '</blockquote>'; quote = false; } };
+  const flushTable = () => { if (tbl) { html += '</tbody></table>'; tbl = false; } };
+  const flushAll = () => { flush(); flushQuote(); flushTable(); };
+  const flushCode = () => { html += '<pre class="code"><code>' + escHtml(codeBuf.join('\n')) + '</code></pre>'; codeBuf = []; };
+  lines.forEach((raw) => {
+    const line = raw.replace(/\s+$/, '');
+    let m;
+    if (/^\s*```/.test(line)) {
+      if (inCode) { flushAll(); flushCode(); inCode = false; }
+      else { flushAll(); inCode = true; }
+      return;
+    }
+    if (inCode) { codeBuf.push(raw); return; }
+    if (!line.trim()) { flushAll(); return; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flushAll(); html += '<hr>'; return; }
+    if ((m = line.match(/^\s*>\s?(.*)$/))) {
+      flush(); flushTable();
+      if (!quote) { html += '<blockquote>'; quote = true; }
+      html += '<p>' + mdInline(m[1]) + '</p>';
+      return;
+    }
+    flushQuote();
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) return;
+      flush();
+      const cells = line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => mdInline(c.trim()));
+      if (!tbl) { html += '<table class="md-tbl"><tbody>'; tbl = true; }
+      html += '<tr>' + cells.map((c) => '<td>' + c + '</td>').join('') + '</tr>';
+      return;
+    }
+    flushTable();
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+      flush();
+      const h = Math.min(5, Math.max(2, m[1].length + 1));
+      html += '<h' + h + '>' + mdInline(m[2]) + '</h' + h + '>';
+    } else if ((m = line.match(/^\s*([-*]|\d+[.)])\s+(.*)$/))) {
+      const t = /^\d/.test(m[1]) ? 'ol' : 'ul';
+      if (list !== t) { flush(); html += '<' + t + '>'; list = t; ltype = t; }
+      html += '<li>' + mdInline(m[2]) + '</li>';
     } else {
-      html += escHtml(p).replace(/`([^`\n]+)`/g, '<code>$1</code>');
+      flush();
+      html += '<p>' + mdInline(line) + '</p>';
     }
   });
+  if (inCode && codeBuf.length) { flushAll(); flushCode(); }
+  flushAll();
   return html;
 }
 
