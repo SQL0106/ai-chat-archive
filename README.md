@@ -41,7 +41,7 @@
 **ChatGPT** — 官方导出
 1. 打开 https://chatgpt.com/#settings/DataControls
 2. 点 **Export data**，等邮箱收到 ZIP
-3. 解压，把 `conversations.json` 放进 `raw/`（整个 ZIP 直接放 `raw/` 也行）
+3. 推荐把整个 ZIP 直接放进 `raw/`，也可解压后放入 `conversations.json` 或全部 `conversations-000.json`、`conversations-001.json` 等分片。
 
 **DeepSeek** — 官方导出
 
@@ -54,6 +54,9 @@ DeepSeek 的 `mapping` 里每个节点是 `{model, inserted_at, fragments[]}`，
 
 > ChatGPT 和 DeepSeek 的导出 ZIP 里都有 `conversations.json`，脚本靠内容嗅探
 > （`"author"` → ChatGPT，`"fragments"` → DeepSeek）自动区分，不用手动指定。
+> ChatGPT 分片导出会读取全部 `conversations-数字.json`；`shared_conversations.json`、
+> `sectioned_conversations.json` 等元数据不会当成聊天正文。旧版曾因此只导入共享记录的空壳；
+> 更新后直接运行 `python3 scripts/incremental.py` 即可补导入，解析器版本变更会使旧缓存自动失效。
 
 **Gemini** — 首选 Takeout 的 HTML，一步到位
 

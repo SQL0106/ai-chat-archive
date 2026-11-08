@@ -114,3 +114,19 @@ analyze.py 行号：`_targets`71（SQL 过滤 + `--ids` 逗号 set 过滤 93-95 
 - 状态：`python3 tools/analyze.py status`（轻，可本机跑）。
 - 自动提交推送：验证过就 `git add <相关文件> && git commit -m <中文> && git push`（本地分支 master，push 用 `git push origin HEAD:main`），不问；不提交密钥。
 - 凭据：SUDO_PASS/GH_TOKEN/SSH_PASS/LLM key 一律不打印不入文件；sudo 用 `echo "$SUDO_PASS" | sudo -S`。
+
+
+## ChatGPT 分片导出兼容（2026-11-08）
+
+- `archive_ai_chats.py` 的 `is_conversations_json`100 按 basename 严格匹配
+  `conversations(?:-[0-9]+)?\.json`，排除 `shared_conversations.json`、
+  `sectioned_conversations.json` 等元数据，避免只导入共享记录空壳。
+- `load_json_any`105 合并 ZIP/TAR 中的全部聊天分片；`sniff_conversations_kind`1144
+  和 `discover`1168 共用文件名判定，也支持直接发现解压后的分片 JSON。
+  本次修改导致上方解析器旧行号后移，以本节行号和函数名为准。
+- `incremental.py` 的 manifest 增加 `parser_versions: {"chatgpt": 2}`。
+  ChatGPT 解析器版本不匹配时，即使输入哈希未变也重新解析；成功写盘后记住版本，
+  下次仍可跳过未变更输入，兼容已有归档的自动补导入。
+- 回归测试：`python3 -m unittest discover -s tests -v`。
+  使用合成数据，覆盖分片 ZIP、共享元数据排除、旧式单文件、DeepSeek 嗅探、
+  解压后的分片、TAR 分片及旧缓存自动补导入后再次跳过。

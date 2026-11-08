@@ -5,7 +5,7 @@
   python3 archive_ai_chats.py --raw raw --out out [--dry-run] [--no-sqlite] [--no-md]
 
 输入 (raw/ 下, 自动发现):
-  conversations.json     ChatGPT 官方导出 ZIP 里的 conversations.json (也可直接放 .zip)
+  conversations*.json    ChatGPT 官方导出（单文件或 conversations-000.json 等分片，也可直接放 ZIP）
   我的活动记录.html      Google Takeout -> My Activity -> Gemini Apps (HTML, 含提问+回答+时间)
   MyActivity.json        Google Takeout -> My Activity -> Gemini Apps (JSON, 仅时间线)
   gemini_chats.ndjson    油猴脚本导出的 Gemini 全文 (可选, 无时间戳, 用 Takeout 回填)
@@ -97,16 +97,38 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def is_conversations_json(name):
+    """只识别正式聊天数据，排除 shared/sectioned_conversations.json 等元数据。"""
+    return re.fullmatch(r"conversations(?:-[0-9]+)?\.json", Path(name).name.lower()) is not None
+
+
 def load_json_any(path):
     path = Path(path)
-    if path.suffix.lower() == ".zip":
-        with zipfile.ZipFile(path) as zf:
-            names = [n for n in zf.namelist() if n.endswith("conversations.json")]
+    if path.suffix.lower() == ".zip" or path.name.lower().endswith(
+            (".tgz", ".tar.gz", ".tar", ".tbz2", ".txz")):
+        opener = zipfile.ZipFile if path.suffix.lower() == ".zip" else tarfile.open
+        with opener(path) as archive:
+            if isinstance(archive, zipfile.ZipFile):
+                names = [n for n in archive.namelist() if is_conversations_json(n)]
+                open_member = archive.open
+            else:
+                names = [m.name for m in archive.getmembers()
+                         if m.isfile() and is_conversations_json(m.name)]
+                open_member = archive.extractfile
             if not names:
-                raise SystemExit("错误: ZIP 内找不到 conversations.json: %s" % path)
-            names.sort(key=len)
-            with zf.open(names[0]) as fh:
-                return json.loads(fh.read().decode("utf-8-sig"))
+                raise SystemExit("错误: 压缩包内找不到 conversations.json 或 conversations-数字.json: %s" % path)
+            result = []
+            for name in sorted(names):
+                with open_member(name) as fh:
+                    data = json.load(fh)
+                if len(names) == 1:
+                    return data
+                if isinstance(data, dict):
+                    data = data.get("conversations") or data.get("data") or []
+                if not isinstance(data, list):
+                    raise SystemExit("错误: 对话分片不是数组: %s: %s" % (path, name))
+                result.extend(data)
+            return result
     try:
         with open(path, "r", encoding="utf-8-sig") as fh:
             return json.load(fh)
@@ -1126,13 +1148,13 @@ def sniff_conversations_kind(path):
         if low.endswith((".tgz", ".tar.gz", ".tar", ".tbz2", ".txz")):
             with tarfile.open(path, "r:*") as tf:
                 for m in tf.getmembers():
-                    if m.isfile() and m.name.lower().endswith("conversations.json"):
+                    if m.isfile() and is_conversations_json(m.name):
                         with tf.extractfile(m) as fh:
                             return _sniff_conversations_bytes(fh.read(1 << 21))
         elif path.suffix.lower() == ".zip":
             with zipfile.ZipFile(path) as zf:
                 for n in zf.namelist():
-                    if n.lower().endswith("conversations.json"):
+                    if is_conversations_json(n):
                         with zf.open(n) as fh:
                             return _sniff_conversations_bytes(fh.read(1 << 21))
         else:
@@ -1150,7 +1172,7 @@ def discover(raw):
             continue
         low = p.name.lower()
         suf = p.suffix.lower()
-        if low == "conversations.json":
+        if is_conversations_json(low):
             (deepseek if sniff_conversations_kind(p) == "deepseek" else chatgpt).append(p)
             continue
         if low == "myactivity.json":
@@ -1158,7 +1180,7 @@ def discover(raw):
             continue
         if suf == ".zip" or low.endswith((".tgz", ".tar.gz", ".tar", ".tbz2", ".txz")):
             names = archive_member_names(p)
-            if any(n.lower().endswith("conversations.json") for n in names):
+            if any(is_conversations_json(n) for n in names):
                 kind = sniff_conversations_kind(p)
                 (deepseek if kind == "deepseek" else chatgpt).append(p)
             elif any(is_activity_html(n) for n in names):
@@ -1185,7 +1207,7 @@ def main():
     ap = argparse.ArgumentParser(description="归档 ChatGPT / Gemini 聊天记录")
     ap.add_argument("--raw", default="raw", help="原始文件目录 (默认 raw)")
     ap.add_argument("--out", default="out", help="输出目录 (默认 out)")
-    ap.add_argument("--chatgpt", action="append", default=[], help="手动指定 conversations.json")
+    ap.add_argument("--chatgpt", action="append", default=[], help="手动指定 ChatGPT JSON（含分片）或导出 ZIP")
     ap.add_argument("--takeout", action="append", default=[], help="手动指定 MyActivity.json")
     ap.add_argument("--takeout-html", action="append", default=[], help="手动指定 我的活动记录.html 或 Takeout 整包")
     ap.add_argument("--gemini", action="append", default=[], help="手动指定 gemini_chats.ndjson")
@@ -1230,7 +1252,7 @@ def main():
     if not (chatgpt_files or gemini_files or takeout_files or activity_files or deepseek_files):
         raise SystemExit(
             "错误: 在 %s 下没找到任何输入。\n"
-            "  ChatGPT : conversations.json (官方导出 ZIP 解压)\n"
+            "  ChatGPT : conversations.json / conversations-000.json / 官方导出 ZIP\n"
             "  Gemini  : 我的活动记录.html (Takeout -> My Activity -> Gemini Apps, HTML)\n"
             "            或 MyActivity.json (JSON 时间线)\n"
             "            或 gemini_chats.ndjson (油猴脚本全文)\n"
