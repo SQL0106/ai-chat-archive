@@ -357,13 +357,23 @@ def cmd_select(a):
 
 def cmd_export(a):
     import export as export_mod
-    ids = arclib.selected_ids(a.collection, arclib.selection_path(a.work))
-    if not ids:
+    if (a.text_only or a.month or a.week) and a.format != "md":
+        print("仅文字和按月/周导出只支持 --format md", file=sys.stderr)
+        return 1
+    all_chats = a.all or bool(a.month or a.week)
+    ids = [] if all_chats else arclib.selected_ids(a.collection, arclib.selection_path(a.work))
+    if not ids and not all_chats:
         print("选集 [%s] 是空的" % a.collection, file=sys.stderr)
         return 1
-    n = export_mod.export(a.collection, ids, fmt=a.format, out_path=a.out,
-                          db=a.db, include_thinking=a.with_thinking)
-    print("已导出 %d 个对话 -> %s" % (n, a.out or "(stdout)"))
+    try:
+        n = export_mod.export(a.collection, ids, fmt=a.format, out_path=a.out,
+                              db=a.db, include_thinking=a.with_thinking,
+                              all_chats=all_chats, text_only=a.text_only,
+                              month=a.month, week=a.week)
+    except (ValueError, OverflowError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print("已导出 %d 个对话 -> %s" % (n, a.out or "(stdout)"), file=sys.stderr)
     return 0
 
 
@@ -431,11 +441,16 @@ def build_parser():
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_select)
 
-    s = sub.add_parser("export", help="导出选集")
+    s = sub.add_parser("export", help="导出选集或全部聊天记录")
     s.add_argument("--collection", default="default")
     s.add_argument("--format", choices=["md", "html", "jsonl"], default="md")
     s.add_argument("-o", "--out")
     s.add_argument("--with-thinking", action="store_true")
+    s.add_argument("--all", action="store_true", help="导出全部来源的对话，按时间升序")
+    s.add_argument("--text-only", action="store_true", help="Markdown 仅文字，不含附件信息或思维链")
+    period_args = s.add_mutually_exclusive_group()
+    period_args.add_argument("--month", metavar="YYYY-MM", help="导出所选月份的消息（UTC+8，仅文字 MD）")
+    period_args.add_argument("--week", metavar="YYYY-Www", help="导出 ISO 周的消息（周一至周日，UTC+8，仅文字 MD）")
     s.set_defaults(func=cmd_export)
 
     return p

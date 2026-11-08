@@ -403,18 +403,42 @@ def api_export(conn, qs):
     if fmt not in EXPORT_CTYPES:
         return {"error": "format 只能是 md/html/jsonl"}, 400
     include_thinking = (qs.get("with_thinking", ["0"])[0] or "") in ("1", "true", "yes", "on")
-    ids = arclib.selected_ids(coll)
+    scope = (qs.get("scope", ["collection"])[0] or "collection").strip()
+    if scope not in ("all", "collection"):
+        return {"error": "scope 只能是 all/collection"}, 400
+    text_only = (qs.get("text_only", ["0"])[0] or "") in ("1", "true", "yes", "on")
+    if text_only and fmt != "md":
+        return {"error": "仅文字模式只支持 Markdown"}, 400
+    month = (qs.get("month", [""])[0] or "").strip()
+    week = (qs.get("week", [""])[0] or "").strip()
+    try:
+        period = export_mod.export_period(month, week, float(TZ_MOD.split()[0]))
+    except (ValueError, OverflowError) as error:
+        return {"error": "无效的导出时段: %s" % error}, 400
+    if period:
+        if scope != "all" or fmt != "md":
+            return {"error": "按月/周导出需要 scope=all 和 format=md"}, 400
+        text_only = True
+    ids = export_mod.all_conversation_ids(conn, period) if scope == "all" else arclib.selected_ids(coll)
+    if scope == "all":
+        coll = "聊天记录 · %s" % period["label"] if period else "全部聊天记录"
     if not ids:
-        return {"error": "选集为空: %s" % coll}, 404
-    if fmt == "md":
+        return {"error": "没有可导出的对话: %s" % coll}, 404
+    if text_only:
+        text, used = export_mod.render_text_md(coll, ids, conn, period)
+    elif fmt == "md":
         text, used = export_mod.render_md(coll, ids, conn, include_thinking=include_thinking)
     elif fmt == "html":
         text, used = export_mod.render_html(coll, ids, conn, include_thinking=include_thinking)
     else:
         text, used = export_mod.render_jsonl(coll, ids, conn, include_thinking=include_thinking)
     if used == 0:
-        return {"error": "选集里的对话都找不到: %s" % coll}, 404
-    return {"text": text, "used": used, "fmt": fmt, "collection": coll}, 200
+        return {"error": "没有可导出的文字消息: %s" % coll}, 404
+    filename = "all-chats.%s" % fmt if scope == "all" else "selection-%s.%s" % (coll, fmt)
+    if period:
+        filename = "chats-%s.md" % period["label"]
+    return {"text": text, "used": used, "fmt": fmt, "collection": coll,
+            "filename": filename}, 200
 
 
 # --------------------------------------------------------------------------
@@ -1337,7 +1361,7 @@ class Handler(BaseHTTPRequestHandler):
                 fmt = data["fmt"]
                 return self.send_text(
                     data["text"], ctype=EXPORT_CTYPES[fmt] + "; charset=utf-8",
-                    download="selection-%s.%s" % (data["collection"], fmt))
+                    download=data["filename"])
             return self.send_json({"error": "未知接口: %s" % path}, 404)
         finally:
             conn.close()

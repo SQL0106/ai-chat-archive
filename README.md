@@ -242,6 +242,36 @@ python3 tools/archive_cli.py export --collection 读书笔记 --format html --wi
 Web 端也能加/删选集（列表和阅读器里的 ☆），导出按钮直接下载。
 导出复用 `out/md/` 里已经写好的 Markdown（找不到时才从 SQLite 现场渲染），思维链默认省略，`--with-thinking` 才带上。
 
+### 全部聊天或按月、按周导出文字合集
+
+网页「选集」页新增 **文字合集**：选择「按月」「按周」或「全部时间」，
+选择需要的月份/周，再点击导出。无需先收藏对话，一次下载一个 Markdown 文件，
+合并全部已导入来源。默认选择当月，避免一次下载整个归档。
+
+- 按**消息发生时间**筛选，周按 ISO 周（周一至周日）计算；网页时区与统计页一致，默认 UTC+8。
+- 跨月/跨周对话只导出所选时段内的消息，不会把整段长对话一起带入。
+- 消息缺少时间时回退对话创建时间，再回退更新时间；时间均缺失的消息只出现在「全部时间」。
+- 保留对话标题、来源、角色、时间和文字正文；省略思维链、附件字段及正文中的图片/音视频引用。
+  普通链接和 Markdown 文字格式保留，不调用 LLM、不总结或截断正文。
+- 无记录的时段会提示错误，不生成空文档；导出的文件是快照，导入新记录后需重新导出。
+
+命令行（项目目录内，时区 UTC+8）：
+
+```bash
+python3 tools/archive_cli.py export --month 2026-02 -o out/chats-2026-02.md
+python3 tools/archive_cli.py export --week 2026-W06 -o out/chats-2026-W06.md
+python3 tools/archive_cli.py export --all --text-only -o out/all-chats.md
+# 也可直接运行导出器
+python3 tools/export.py --month 2026-02 -o out/chats-2026-02.md
+```
+
+`--month` 与 `--week` 互斥，并自动启用全来源、仅文字 Markdown 模式。
+既有选集的 md/html/jsonl 导出保留。网页接口示例：
+`/api/export?scope=all&format=md&month=2026-02`、
+`/api/export?scope=all&format=md&week=2026-W06`；
+全量文字导出为 `/api/export?scope=all&format=md&text_only=1`。
+更新后端代码后需重启 Web 服务，并通过服务的 HTTP 地址访问页面。
+
 ## LLM 分析（价值分层 / 情绪时间线）
 
 把每个对话打分，分出**有价值 / 一般 / 噪声**，并按周聚合出**情绪曲线**。

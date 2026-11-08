@@ -130,3 +130,22 @@ analyze.py 行号：`_targets`71（SQL 过滤 + `--ids` 逗号 set 过滤 93-95 
 - 回归测试：`python3 -m unittest discover -s tests -v`。
   使用合成数据，覆盖分片 ZIP、共享元数据排除、旧式单文件、DeepSeek 嗅探、
   解压后的分片、TAR 分片及旧缓存自动补导入后再次跳过。
+
+## 文字合集导出：全部 / 按月 / 按周
+
+- `tools/export.py`：`export_period` 验证月份与 ISO 周并计算半开 UTC 时间范围；
+  `period_filter`/`all_conversation_ids`/`render_text_md` 从 SQLite 按消息时间筛选、按对话组织输出。
+  缺消息时间时回退对话创建/更新时间，跨期对话只输出当期消息；按月/周模式跳过无文字的对话。
+  `text_without_media` 排除正文媒体引用，文字模式不读取 thinking/attachments。
+- 命令行两入口 `tools/export.py`、`tools/archive_cli.py export` 均支持
+  `--all --text-only` 或互斥的 `--month YYYY-MM` / `--week YYYY-Www`；
+  周一到周日，CLI 默认 UTC+8，按期仅支持 Markdown，错误不覆盖原有导出文件。
+  成品先写同目录 `.tmp` 再替换，状态消息写 stderr，正文 stdout 可直接重定向。
+- `scripts/serve_archive.py` 的 `api_export` 支持 `scope=all&format=md` 搭配
+  `month`/`week`/`text_only`，月份/周错误返回 400，空时段返回 404。
+  网页按服务展示时区计算范围，文件名为 `chats-<月份或周>.md` 或 `all-chats.md`。
+- `web/index.html` / `web/app.js`：「选集」页的「文字合集」默认按月，支持周与全部时间；
+  下载使用 fetch 检查失败并显示原因，成功后生成下载链接，防止空时段跳到 JSON 错误页。
+- `tests/test_text_export.py` 全部使用合成数据，覆盖导出正文、无选集、月/周边界、
+  跨年周、闰月、缺时间回退、服务时区、非法/空时段和两种命令行入口。
+  验证命令：`python3 -m unittest discover -s tests -v`、`node --check web/app.js`。

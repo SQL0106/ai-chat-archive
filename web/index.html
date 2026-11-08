@@ -444,6 +444,23 @@ try {
       </div>
       <p class="hint">在「浏览」列表或阅读器里点 ☆ 把对话加入选集。选集保存在
         <code>work/selection.jsonl</code>（追加写入，可手工编辑）。</p>
+      <div class="filters">
+        <label class="inline">文字合集
+          <select id="exportRangeMode">
+            <option value="month">按月</option>
+            <option value="week">按周</option>
+            <option value="all">全部时间</option>
+          </select>
+        </label>
+        <label class="inline" id="exportMonthLabel">月份
+          <input type="month" id="exportMonth" aria-label="导出月份">
+        </label>
+        <label class="inline hidden" id="exportWeekLabel">周
+          <input type="week" id="exportWeek" placeholder="YYYY-Www" aria-label="导出周">
+        </label>
+        <button id="exportAllTextMd" class="primary">导出本月文字 MD</button>
+      </div>
+      <p class="hint">文字合集无需收藏，合并所有已导入来源，按消息发生时间筛选；跨月对话只包含所选时段的消息。周一至周日为一周，时区与统计页一致（默认 UTC+8）；无消息时间则回退对话创建/更新时间。仅保留标题、来源、角色、时间和文字，不含思维链、图片及附件引用。</p>
       <div id="selList" class="conv-list"></div>
     </div>
   </section>

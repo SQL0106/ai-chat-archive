@@ -1614,6 +1614,62 @@ function exportSelection(fmt) {
   location.href = '/api/export?' + p.toString();
 }
 
+function updateTextExportRange() {
+  const mode = $('#exportRangeMode').value;
+  $('#exportMonthLabel').classList.toggle('hidden', mode !== 'month');
+  $('#exportWeekLabel').classList.toggle('hidden', mode !== 'week');
+  $('#exportAllTextMd').textContent = mode === 'month' ? '导出所选月份 MD'
+    : mode === 'week' ? '导出所选周 MD' : '全部聊天（仅文字 MD）';
+  const day = fmtDate(new Date().toISOString());
+  if (!$('#exportMonth').value) $('#exportMonth').value = day.slice(0, 7);
+  if (!$('#exportWeek').value) {
+    const thursday = new Date(day + 'T00:00:00Z');
+    thursday.setUTCDate(thursday.getUTCDate() + 4 - (thursday.getUTCDay() || 7));
+    const year = thursday.getUTCFullYear();
+    const start = new Date(Date.UTC(year, 0, 1));
+    const week = Math.ceil(((thursday - start) / 86400000 + 1) / 7);
+    $('#exportWeek').value = year + '-W' + String(week).padStart(2, '0');
+  }
+}
+
+async function exportTextArchive() {
+  const mode = $('#exportRangeMode').value;
+  const params = new URLSearchParams({ scope: 'all', format: 'md', text_only: '1' });
+  if (mode !== 'all') {
+    const input = mode === 'month' ? $('#exportMonth') : $('#exportWeek');
+    if (!input.value || !input.checkValidity()) {
+      toast(mode === 'month' ? '请选择要导出的月份' : '请选择要导出的周（YYYY-Www）');
+      return;
+    }
+    params.set(mode, input.value);
+  }
+  const button = $('#exportAllTextMd');
+  button.disabled = true;
+  let downloadUrl;
+  try {
+    const response = await fetch('/api/export?' + params.toString());
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'HTTP ' + response.status);
+    }
+    downloadUrl = URL.createObjectURL(await response.blob());
+    const link = el('a');
+    link.href = downloadUrl;
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const filename = disposition.match(/filename="([^"]+)"/);
+    link.download = filename ? filename[1] : 'chats.md';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    toast('文字合集已生成，正在下载');
+  } catch (error) {
+    toast('导出失败：' + error.message);
+  } finally {
+    button.disabled = false;
+    if (downloadUrl) setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+  }
+}
+
 /* ---------------- 阅读器 ---------------- */
 let currentConv = null;
 let currentMarks = [];
@@ -2000,6 +2056,9 @@ function init() {
   $('#selExportMd').onclick = () => exportSelection('md');
   $('#selExportHtml').onclick = () => exportSelection('html');
   $('#selExportJsonl').onclick = () => exportSelection('jsonl');
+  $('#exportRangeMode').onchange = updateTextExportRange;
+  $('#exportAllTextMd').onclick = exportTextArchive;
+  updateTextExportRange();
 
   // 阅读器
   $('#readerClose').onclick = closeReader;
