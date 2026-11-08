@@ -455,6 +455,9 @@ def run_import(args, runner):
         except ValueError:
             old_manifest = {}
     old_inputs = old_manifest.get("inputs") or {}
+    # 导出文件哈希不变也可能需要用新版解析器补导入（旧版会漏掉 ChatGPT 分片）。
+    parser_versions = {"chatgpt": 2}
+    old_parser_versions = old_manifest.get("parser_versions") or {}
 
     runner.update(phase="hash", i=0, total=len(todo), step="计算输入哈希")
     all_inputs = {}
@@ -468,7 +471,10 @@ def run_import(args, runner):
             runner.log("[!] 读取失败 %s: %s" % (p, e))
             continue
         all_inputs[str(p)] = h
-        unchanged = (not args.force_full) and lookup_hash(old_inputs, p) == h
+        parser_unchanged = (kind not in parser_versions or
+                            old_parser_versions.get(kind) == parser_versions[kind])
+        unchanged = ((not args.force_full) and parser_unchanged
+                     and lookup_hash(old_inputs, p) == h)
         if kind == "takeout":
             if not unchanged:
                 takeout_changed = True
@@ -480,7 +486,7 @@ def run_import(args, runner):
     runner.log("输入 %d 个：跳过 %d（未变更），待解析 %d%s"
                % (len(todo), len(skipped), len(plan),
                   "，takeout 有变更" if takeout_changed else ""))
-    inputs_changed = all_inputs != old_inputs
+    inputs_changed = (all_inputs != old_inputs or parser_versions != old_parser_versions)
 
     runner.update(phase="parse", i=0, total=max(len(plan), 1), step="解析")
     new_convs = []
@@ -537,6 +543,7 @@ def run_import(args, runner):
     if not added and not changed:
         if inputs_changed and not args.dry_run:
             old_manifest["inputs"] = all_inputs
+            old_manifest["parser_versions"] = parser_versions
             old_manifest["generated_at"] = now_iso()
             old_manifest["last_import"] = {
                 "mode": "incremental", "at": now_iso(), "parsed": len(plan),
@@ -588,6 +595,7 @@ def run_import(args, runner):
     manifest = {
         "generated_at": now_iso(),
         "inputs": all_inputs,
+        "parser_versions": parser_versions,
         "by_source": by_source,
         "timestamp_sources": ts_stats,
         "gemini_dated_ratio": (g_dated / g_total) if g_total else 0.0,
