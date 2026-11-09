@@ -1,4 +1,4 @@
-# 归档数据：体积大（raw 157M / out 677M），而且是你自己的聊天记录，不传
+# 原始聊天导出和生成的归档属于本地数据，不提交
 raw/
 out/
 
@@ -21,3 +21,10 @@ venv/
 .vscode/
 *.swp
 .agent/
+
+# 本地凭据与环境配置
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*

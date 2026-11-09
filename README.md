@@ -469,7 +469,7 @@ ORDER BY timestamp;
 - 脚本只用 Python 3 标准库，不需要 pip 安装任何东西
 - `messages_fts` 的 `unicode61` 分词器对中文基本无效（一个词命中率只有 3%–9%），
   所以中文检索走 `LIKE` 全表扫描（约 0.3 秒），代价是没有 BM25 排序、只能按词频+标题加权。
-  换成 `trigram` 分词器要重建几百 MB 索引，这台机器空间和供电都不划算，暂时不动。
+  如改用 `trigram` 分词器，需要重建索引并评估磁盘空间和查询性能。
 
 ## 待办 / 可继续的方向
 
@@ -478,7 +478,7 @@ ORDER BY timestamp;
   原子 SQLite、`--analyze` 自动串 heuristic+LLM 心理链）；Gemini Takeout **JSON** 活动记录解析器；
   网页「智能」页数据导入卡（`/api/upload` + `/api/import` 上传→增量→分析→进度轮询）；
   `analyze.py` 新增 `--ids`、`--topic` 主题过滤改为**全文扫描**（此前只扫首条消息前 800 字导致 0 命中）；
-  归档 5745 对话全部分析完毕（pending=0，LLM 只跑 `--topic self-psych`，全程 ¥0）。
+  可通过 `--topic self-psych` 限定 LLM 分析范围，并通过状态接口检查进度。
 
 - [x] **优化网页**（性能）· 2026-10-01 完成，实测（chrome-devtools）：
   - 时间线由「每点 2 个 SVG rect」改为 **canvas 单元素绘制 + dpr 缩放**（悬停用坐标反算，不建命中区，换主题自动重画）：
@@ -489,3 +489,28 @@ ORDER BY timestamp;
   - 静态文件 **gzip**（`Accept-Encoding` 协商，app.js 74KB → 22KB，style.css/HTML 同样压缩）；服务改后需 `sudo systemctl restart ai-archive-web`。
   - 长任务：首屏无 >50ms longtask；浏览列表本就是滚动触底按 50 条懒加载，未再做虚拟滚动。
   - 验证：0 console error（仅浏览器自带 verbose 提示）。
+
+
+## Gemini 问答兼容与批量按月导出
+
+Gemini Takeout JSON 支持 `Prompted`、`Branched`、`Imported prompt`、
+`Added chat from link:` 四类问答。纯附件提问、纯图片回答保留消息与附件字段；
+仅文字导出对无正文消息显示占位。HTML 表格保留列间分隔，避免各列文字粘连。
+活动解析器版本升级后，即使输入文件的 SHA256 未变，也会自动补导入旧解析器漏掉的记录。
+
+把 Takeout 中的 `我的活动记录.json` 放入 `raw/Gemini Apps/` 后，在项目根目录运行：
+
+```bash
+python3 scripts/incremental.py
+python3 scripts/export_monthly.py --out out/monthly-new
+# 可选：同时生成压缩包
+python3 scripts/export_monthly.py --out out/monthly-with-zip --zip out/monthly.zip
+```
+
+输出为 `YYYY-MM.md`、`目录.md` 和 `导出统计.json`。按每条消息的北京时间（UTC+8）分月，
+跨月对话仅收录各月对应的消息；消息时间缺失时回退对话创建、更新时间，仍未知则单列。
+正文保留代码，不总结、不截断，省略思维链、附件字段和媒体引用。
+输出目录必须尚不存在，防止覆盖已有导出。此功能与已有按月、按周文字合集接口兼容。
+
+原始导出、生成的聊天归档、数据库、日志和本地配置应保存在被 Git 忽略的目录中。
+仓库中仅保留功能代码、通用说明以及使用合成数据的测试，不提交个人聊天内容。

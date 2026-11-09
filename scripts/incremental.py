@@ -455,8 +455,8 @@ def run_import(args, runner):
         except ValueError:
             old_manifest = {}
     old_inputs = old_manifest.get("inputs") or {}
-    # 导出文件哈希不变也可能需要用新版解析器补导入（旧版会漏掉 ChatGPT 分片）。
-    parser_versions = {"chatgpt": 2}
+    # 解析器升级后补导入旧缓存：ChatGPT 分片，以及 Gemini 导入/分享聊天和纯媒体消息。
+    parser_versions = {"chatgpt": 2, "activity": 2}
     old_parser_versions = old_manifest.get("parser_versions") or {}
 
     runner.update(phase="hash", i=0, total=len(todo), step="计算输入哈希")

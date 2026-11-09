@@ -8,7 +8,7 @@
   - 导出文本默认截断到 200000 字符
 
 用法（在 MCP 客户端里配置）：
-    {"command": "python3", "args": ["/home/SQL916/ai-chat-archive/tools/mcp_server.py"]}
+    {"command": "python3", "args": ["/path/to/ai-chat-archive/tools/mcp_server.py"]}
 
 也支持 `--db` / `--work` 指定数据库与选集目录。
 """

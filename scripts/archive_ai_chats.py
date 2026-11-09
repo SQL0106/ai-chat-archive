@@ -528,6 +528,7 @@ def html_to_text(h):
         return ""
     s = re.sub(r"<br\s*/?>", "\n", h, flags=re.I)
     s = re.sub(r"<li[^>]*>", "- ", s, flags=re.I)
+    s = re.sub(r"</(?:td|th)\s*>", "\t", s, flags=re.I)
     for tag in _BLOCK_TAGS:
         s = re.sub(r"</%s\s*>" % tag, "\n", s, flags=re.I)
     s = re.sub(r"<[^>]+>", "", s)
@@ -675,7 +676,8 @@ def parse_gemini_activity_json(path):
     """解析 Google Takeout 的 Gemini Apps '我的活动记录.json'。
 
     每条记录一轮问答：
-      title="Prompted <提问>"，time=ISO8601(Z)，cid 在 details[].url，
+      title 支持 Prompted / Branched / Imported prompt / Added chat from link，
+      time=ISO8601(Z)，cid 在 details[].url，
       回答在 safeHtmlItem[].html。产出与 HTML 版同构的 convs。
     """
     print("[*] 解析 Gemini 活动记录 JSON: %s" % Path(path).name)
@@ -698,7 +700,7 @@ def parse_gemini_activity_json(path):
         title = str(it.get("title") or "").strip()
         if not title:
             continue
-        am = re.match(r"(Prompted|Branched)[\s\xa0]+", title)
+        am = re.match(r"(Prompted|Branched|Imported prompt|Added chat from link:)(?:[\s\xa0]+|$)", title)
         if not am:
             continue
         action = am.group(1)
@@ -722,7 +724,9 @@ def parse_gemini_activity_json(path):
             str(x.get("html") or "") for x in (it.get("safeHtmlItem") or [])
             if isinstance(x, dict))
         resp = html_to_text(resp_html)
-        if not (prompt or resp):
+        user_atts = list(it.get("attachedFiles") or [])
+        response_atts = extract_html_attachments(resp_html)
+        if not (prompt or resp or user_atts or response_atts):
             continue
         if cid not in convs:
             convs[cid] = {"source": "gemini", "conversation_id": cid,
@@ -731,7 +735,7 @@ def parse_gemini_activity_json(path):
             order.append(cid)
         convs[cid]["messages"].append({
             "ts": ts, "prompt": prompt, "resp": resp,
-            "atts": extract_html_attachments(resp_html), "action": action,
+            "atts": response_atts, "user_atts": user_atts, "action": action,
         })
 
     conversations = []
@@ -741,11 +745,11 @@ def parse_gemini_activity_json(path):
         rows = []
         for e in events:
             src = "native" if e["ts"] else "none"
-            if e["prompt"]:
+            if e["prompt"] or e["user_atts"]:
                 rows.append({"role": "user", "text": e["prompt"], "thinking": "",
-                             "model": None, "attachments": [], "timestamp": e["ts"],
+                             "model": None, "attachments": e["user_atts"], "timestamp": e["ts"],
                              "timestamp_source": src})
-            if e["resp"]:
+            if e["resp"] or e["atts"]:
                 rows.append({"role": "assistant", "text": e["resp"], "thinking": "",
                              "model": None, "attachments": e["atts"],
                              "timestamp": e["ts"], "timestamp_source": src})
